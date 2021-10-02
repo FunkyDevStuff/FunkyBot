@@ -1,6 +1,6 @@
 # Contributing to TheImperialGod
 So, if you came here then you must be ready to contribute.  <br> 
-We don't have quite a lot of contributors / collaborators. 
+We are happy to have you contribute to our open source repository.
 
 Most people on github get confused between a collaborator and a contributor. 
 We will show you what they all mean (not for organization repositories but normal ones)
@@ -42,4 +42,3 @@ Steps:
 5. I chat / take the pull request
 
 The second I take the pull request and merge it into my branch, you become a contributor. 
-The number of forks mean nothing, since people just fork to admire a repository and do nothing in their fork.
