@@ -1,4 +1,3 @@
-# Contributing to TheImperialGod
 So, if you came here then you must be ready to contribute.  <br> 
 We are happy to have you contribute to our open source repository.
 
