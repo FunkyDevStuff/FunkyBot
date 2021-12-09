@@ -209,7 +209,7 @@ async def penis(ctx, user: discord.Member=None):
 !quest
   !quest list [class|search term|quest master|"party"|"solo"] [sort_by(recent|xp|party)]
   !quest info <quest_name>
-  !quest accept|take <name> [party_member_mentions]
+  !quest accept <name> [party_member_mentions]
   !quest log [quest_name_or_number][.task_name_or_number] ["pending"] (is there a better word?)
   !quest new <options>
    <name>
