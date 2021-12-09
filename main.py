@@ -127,11 +127,13 @@ async def stinky(ctx):
 
 # example command from Red
 @bot.command()
-async def penis(ctx, user: discord.Member):
+async def penis(ctx, user: discord.Member=None):
     """Detects user's penis length
     This is 100% accurate."""
 
     state = random.getstate()
+    if user is None:
+      user = ctx.author
 
     random.seed(user.id)
     dong = "8{}D".format("=" * random.randint(0, 30))
@@ -140,6 +142,8 @@ async def penis(ctx, user: discord.Member):
     msg = "{}'s size:\n{}\n".format(user.display_name, dong)
 
     await ctx.send(msg)
+
+
 
 # this runs the web server
 server.keep_alive()
