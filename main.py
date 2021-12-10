@@ -297,9 +297,51 @@ async def master_role(ctx, role: discord.Role=None):
 
 @quest.command()
 @is_quest_master()
-async def new(ctx):
-  """start creating a new quest"""
-  await ctx.send('k')
+async def new(ctx, *, options:str):
+  """start creating a new quest. options must be in the following format on separate lines:
+  
+  <name>
+  [option_name=option_value]
+  ...
+  [description]
+
+  available options are:
+             xp - defaults to 0. bonus xp for completing the quest. 
+          party - defaults to 1. party size required to start the quest. 
+                  set to 0 for an open quest; a quest that anybody can
+                  contribute to at any time.
+           time - defaults to 2w. the time limit for parties to complete
+                  the quest once started. range is 1d - 2m.
+                  (admins can set this to 0 for no time limit)
+        expires - defaults to 2w. the time your quest will stay on the
+                  quest board. range is 1d - 1m. 
+                  (admins can set this to 0 for no expiration)
+    progression - defaults to no. whether or not tasks are hidden to 
+                  adventurers until they complete the previous task.
+        repeats - defaults to 0. the number of times a quest can be 
+                  taken before it is taken off the quest board. 
+                  (admins can set this to -1 to allow infinite repeats)
+         redoes - defaults to no. when a quest has repeats, this option 
+                  specifies whether an adventurer is allowed to take the 
+                  quest again.
+  
+  examples:
+    !quest new Dog Bones
+    xp=10
+    I need more bones to create my army of bloodhounds.
+    Get me 2s and I'll make it worth your while.
+    Prize: 1 diamond
+
+    !quest new Rockets Red Glare
+    xp=50
+    time=1w
+    progression=yes
+    party=3
+    I need me some rockets to celebrate my freedom
+  """
+  options = options.strip()
+  options.split('\n')
+  await ctx.send(f'|{options}|')
 
 # this runs the web server
 server.keep_alive()
