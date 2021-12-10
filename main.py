@@ -12,7 +12,8 @@ from replit import db
 from copy import deepcopy
 import traceback
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
 
 description = '''An example bot to showcase the discord.ext.commands extension
 module.
@@ -247,6 +248,79 @@ async def penis(ctx, user: discord.Member=None):
   !quest leaderboard [quest_name[.task_name]]
 """
 
+def int_parser(default, minv=None, maxv=None):
+  def int_parser_pred(s):
+    mn=minv
+    mx=maxv
+    if s is None:
+      return default
+    try:
+      v = int(s)
+    except ValueError:
+      raise commands.ArgumentParsingError(f'{s} cannot be converted to a whole number')
+    if mn is None:
+      mx = v
+    if mx is None:
+      mx = v
+    if v < mn:
+      raise commands.ArgumentParsingError(f'{v} is less than the minimum value {mn}')
+    if v > mx:
+      raise commands.ArgumentParsingError(f'{v} is greater than the maximum value {mx}')
+    return v
+  return int_parser_pred
+
+SPAN_PATTERN = re.compile(r'(?P<amt>[0-9]+)(?P<span>[dw]?)')
+
+def parse_delta(s):
+  m = SPAN_PATTERN.match(s)
+  n = int(xmatch.group('amt'))
+  p = xmatch.group('span')
+  if not p:
+    p = 'd'
+  if p not in 'dw'
+
+def time_parser(default, minv, maxv):
+  xmatch = SPAN_PATTERN.match(maxv)
+  xn = int(xmatch.group('amt'))
+  xs = xmatch.group('span')
+  if xs 
+  mmatch = SPAN_PATTERN.match(minv)
+  mn = int(xmatch.group('amt'))
+  ms = xmatch.group('span')  
+  def time_parser_pred(s):
+    if s is None:
+      return default
+    smatch = SPAN_PATTERN.match(minv)
+    sn = xmatch.group('amt')
+    ss = xmatch.group('span')
+    now = datetime.now()
+  pass
+
+def bool_parser(default):
+  def bool_parser_pred(s):
+    if s is None:
+      return default
+    # from commands.converter
+    lowered = s.lower()
+    if lowered in ('yes', 'y', 'true', 't', '1', 'enable', 'on'):
+        return True
+    elif lowered in ('no', 'n', 'false', 'f', '0', 'disable', 'off'):
+        return False
+    else:
+      raise commands.ArgumentParsingError(f'cannot convert {s} to true/false')
+
+
+QUEST_OPTION_PARSERS = {
+  "xp": int_parser(0, 0),
+  "party": int_parser(1, 0),
+  "time": time_parser('2w', '1d', '8w'),
+  "expires": time_parser('2w', '1d', '4w'),
+  "progression": bool_parser(False),
+  "repeats": int_parser(0, 0),
+  "redoes": bool_parser(False)
+}
+
+
 def save_bot_settings():
   db['BOT_SETTINGS'] = deepcopy(bot_settings)
 
@@ -277,6 +351,11 @@ def is_quest_master():
     return quest_settings['quest_master_role'] in [r.id for r in ctx.message.author.roles]
   return commands.check(predicate)
 
+def is_quest_master_or_admin():
+  def predicate(ctx):
+    return is_quest_master()(ctx) or is_admin()(ctx)
+  return commands.check(predicate)
+
 @bot.group()
 async def quest(ctx):
   """quest commands"""
@@ -296,7 +375,7 @@ async def master_role(ctx, role: discord.Role=None):
     await ctx.send('quest master role has been unset')
 
 @quest.command()
-@is_quest_master()
+@is_quest_master_or_admin()
 async def new(ctx, *, options:str):
   """start creating a new quest. options must be in the following format on separate lines:
   
@@ -311,10 +390,10 @@ async def new(ctx, *, options:str):
                   set to 0 for an open quest; a quest that anybody can
                   contribute to at any time.
            time - defaults to 2w. the time limit for parties to complete
-                  the quest once started. range is 1d - 2m.
+                  the quest once started. range is 1d - 8w.
                   (admins can set this to 0 for no time limit)
         expires - defaults to 2w. the time your quest will stay on the
-                  quest board. range is 1d - 1m. 
+                  quest board. range is 1d - 4w (1 day - 4 weeks). 
                   (admins can set this to 0 for no expiration)
     progression - defaults to no. whether or not tasks are hidden to 
                   adventurers until they complete the previous task.
@@ -340,8 +419,115 @@ async def new(ctx, *, options:str):
     I need me some rockets to celebrate my freedom
   """
   options = options.strip()
-  options.split('\n')
-  await ctx.send(f'|{options}|')
+  name, *options = [o.strip() for o in options.split('\n')]
+  
+
+  await ctx.send(f'name: {name}\noptions: {options}')
+
+
+@quest.command()
+async def list(ctx, search_term: str=None, sort_by: str=None):
+  """lists all available quests. You can also narrow your search using a search term.
+
+    search_term: can be one of the following:
+             class - one of the available quest classes(tags). 
+                     use .quest classes for a list.
+      quest master - the @mention of the quest master/creator.
+        party type - party, solo, or open
+       search term - any other generic term to search for in the quest
+
+    sort_by: a term to sort by when displaying the list. can be:
+            recent - most recent quests first. this is the default.
+               old - oldest quests first.
+                xp - quests with highest xp reward first.
+             party - quests with highest party size first.
+
+  """
+  pass
+
+@quest.command()
+async def info(ctx):
+  '''Help 
+   !quest info <questID> - Gives all all information currently availale about a quest 
+  '''
+  pass
+
+@quest.command()
+async def accept(ctx):
+  '''Help 
+    !quest accept <questID> [all @ party members] - Accepts a quest either by yourself or with the mentioned members 
+  '''
+  pass
+
+@quest.command()
+async def log(ctx):
+  '''Help 
+   !quest log [questID] [ .taskID]  - Gives information about a quest in progress including current completion percent/level
+  '''
+  pass
+
+@quest.command(name="set")
+async def quest_set(ctx):
+  '''Help 
+  !quest set <option> <questID> [value] - Edits a quest at a later point, e.g to add missed tags or increase xp reward
+  '''
+  pass
+
+@quest.command()
+async def claim(ctx):
+  '''Help 
+  !quest claim <questID> [ .TaskID] [decription] - Claims a quest / task is complete with description to await verification
+  '''
+  pass
+
+@quest.command()
+async def verify(ctx):
+  '''Help 
+   !quest verify <message_id> - Verifies claims (Questmaster only)
+  '''
+  pass
+
+@quest.command()
+async def leaderboard(ctx):
+  '''Help 
+   !quest leaderboard [quest_name[.task_name]] - Displays leaderboard of global levelor specified quest xp
+  '''
+  pass
+
+@quest.command()
+async def notify(ctx):
+  '''Help 
+    !quest notify [class|search term|quest master|"party"|"solo"] -  Notifys of quests posts matching specified parameters
+  '''
+  pass
+
+@quest.group()
+async def task(ctx):
+  """hlel
+  """
+  pass
+
+@task.command(name="add")
+async def task_add(ctx):
+  '''Help 
+   !quest task add <questID> [ .TaskID] <options> - Creates a new numbered task within a stated quest
+   '''
+  pass
+
+@task.command(name="set")
+async def task_set(ctx):
+  '''Help
+ !quest task set <questID . TaskID>  - Edits a task at later point to e.g add/remove objectives or xp rewards
+   '''
+  pass
+
+@task.command(name="delete")
+async def task_delete(ctx):
+  '''Help 
+  !quest task delete <questID . TaskID> - Deletes the specified task
+   '''
+  pass
+
 
 # this runs the web server
 server.keep_alive()
