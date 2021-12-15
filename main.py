@@ -13,6 +13,7 @@ from copy import deepcopy
 import traceback
 import random
 from datetime import datetime, timedelta
+import pytz
 import re
 
 description = '''An example bot to showcase the discord.ext.commands extension
@@ -269,32 +270,34 @@ def int_parser(default, minv=None, maxv=None):
     return v
   return int_parser_pred
 
-SPAN_PATTERN = re.compile(r'(?P<amt>[0-9]+)(?P<span>[dw]?)')
+SPAN_PATTERN = re.compile(r'(?P<amt>[0-9]+)(?P<span>[dw])')
 
 def parse_delta(s):
+  if s == '0':
+    return 0
   m = SPAN_PATTERN.match(s)
-  n = int(xmatch.group('amt'))
-  p = xmatch.group('span')
-  if not p:
-    p = 'd'
-  if p not in 'dw'
+  if not m:
+    raise commands.ArgumentParsingError(f'{s} is not a valid timespan format.')
+  n = int(m.group('amt'))
+  p = m.group('span')
+  if p == 'w':
+    n *= 7
+  return n
 
 def time_parser(default, minv, maxv):
-  xmatch = SPAN_PATTERN.match(maxv)
-  xn = int(xmatch.group('amt'))
-  xs = xmatch.group('span')
-  if xs 
-  mmatch = SPAN_PATTERN.match(minv)
-  mn = int(xmatch.group('amt'))
-  ms = xmatch.group('span')  
+  df = parse_delta(default)
+  mn = parse_delta(minv)
+  mx = parse_delta(maxv)
   def time_parser_pred(s):
     if s is None:
-      return default
-    smatch = SPAN_PATTERN.match(minv)
-    sn = xmatch.group('amt')
-    ss = xmatch.group('span')
-    now = datetime.now()
-  pass
+      return df
+    days = parse_delta(s)
+    if days < mn:
+      raise commands.ArgumentParsingError(f'{s} is less than the minimum value {minv}')
+    if days > mx:
+      raise commands.ArgumentParsingError(f'{s} is greater than the minimum value {maxv}')
+    return days
+  return time_parser_pred
 
 def bool_parser(default):
   def bool_parser_pred(s):
@@ -318,28 +321,13 @@ QUEST_OPTION_PARSERS = {
   "progression": bool_parser(False),
   "repeats": int_parser(0, 0),
   "redoes": bool_parser(False)
-}
-
+} 
 
 def save_bot_settings():
   db['BOT_SETTINGS'] = deepcopy(bot_settings)
 
 def save_quests():
   db['QUEST_SETTINGS'] = deepcopy(quest_settings)
-
-@bot.group(name="set")
-@commands.is_owner()
-async def _set(ctx):
-  """bot settings"""
-  if ctx.invoked_subcommand is None:
-    await ctx.send_help(ctx.command)
-
-@_set.group()
-async def admin(ctx, role: discord.Role):
-  """bot settings"""
-  bot_settings['admin_role'] = role.id
-  save_bot_settings()
-  await ctx.send(f'admin role set to {role.name}')
 
 def is_admin():
   def predicate(ctx):
@@ -356,6 +344,65 @@ def is_quest_master_or_admin():
     return is_quest_master()(ctx) or is_admin()(ctx)
   return commands.check(predicate)
 
+@bot.command(name="error")
+@is_admin()
+async def _error(ctx):
+  """display the bot's last exception"""
+  await ctx.reply(f'```py\n{bot._last_exception}```')
+
+
+@bot.group(name="set")
+@is_admin()
+async def _set(ctx):
+  """bot settings"""
+  if ctx.invoked_subcommand is None:
+    await ctx.send_help(ctx.command)
+
+@_set.command()
+@commands.is_owner()
+async def admin(ctx, role: discord.Role):
+  """bot settings"""
+  bot_settings['admin_role'] = role.id
+  save_bot_settings()
+  await ctx.reply(f'admin role set to {role.name}')
+
+def setup_hammertime():
+  if 'hammertime' not in bot_settings:
+    bot_settings['hammertime'] = {
+      'roles': {},
+      'users': {}
+    }
+    save_bot_settings()
+
+NOT_A_TIMEZONE_MSG = "is not an available time zone. Use a timezone available at https://hammertime.djdavid98.art/ or if one of those don\'t work, use one from <https://gist.github.com/heyalexej/8bf688fd67d7199be4a1682b3eec7568>"
+
+@_set.command()
+async def hammertimerole(ctx, role: discord.Role=None, timezone:str=None):
+  """add or remove a discord role as a role to be used with the hammertime command. 
+  
+  Leave timezone blank to remove the role from hammertime.
+  
+  Use the command by itself to list the roles currently added.
+  """
+  setup_hammertime()
+  
+  if role is None:
+    roles = '  '.join(sorted([ctx.guild.get_role(int(rid)).name for rid in bot_settings['hammertime']['roles']]))
+    return await ctx.reply(f'Roles used with `{bot.prefix}hammertime`:\n**{roles}**')
+  
+  if timezone is None:
+    if str(role.id) not in bot_settings['hammertime']['roles']:
+      return await ctx.reply(f'**{role}** is already not being used with hammertime')
+    del bot_settings['hammertime']['roles'][str(role.id)]
+    save_bot_settings()
+    return await ctx.reply(f'**{role}** removed from hammertime.')
+  else:
+    if timezone not in pytz.all_timezones:
+      return await ctx.reply(f'{timezone} {NOT_A_TIMEZONE_MSG}')
+    bot_settings['hammertime']['roles'][str(role.id)] = timezone
+    save_bot_settings()
+    return await ctx.reply(f'the **{role}** role has been added to hammertime. People with this role will now be treated as being in that timezone when using `{bot.prefix}hammertime`')
+
 @bot.group()
 async def quest(ctx):
   """quest commands"""
@@ -365,7 +412,7 @@ async def quest(ctx):
 @quest.command(name="masterrole")
 @is_admin()
 async def master_role(ctx, role: discord.Role=None):
-  """set the quest master role. leave blank to unset"""
+  """Set the Quest Master Role. Leave blank to unset"""
   rid = role and role.id
   quest_settings['quest_master_role'] = rid
   save_quests()
@@ -377,7 +424,8 @@ async def master_role(ctx, role: discord.Role=None):
 @quest.command()
 @is_quest_master_or_admin()
 async def new(ctx, *, options:str):
-  """start creating a new quest. options must be in the following format on separate lines:
+  """Start creating a new quest. 
+  options must be in the following format on separate lines:
   
   <name>
   [option_name=option_value]
@@ -405,13 +453,13 @@ async def new(ctx, *, options:str):
                   quest again.
   
   examples:
-    !quest new Dog Bones
+    .quest new Dog Bones
     xp=10
     I need more bones to create my army of bloodhounds.
     Get me 2s and I'll make it worth your while.
     Prize: 1 diamond
 
-    !quest new Rockets Red Glare
+    .quest new Rockets Red Glare
     xp=50
     time=1w
     progression=yes
@@ -427,7 +475,8 @@ async def new(ctx, *, options:str):
 
 @quest.command()
 async def list(ctx, search_term: str=None, sort_by: str=None):
-  """lists all available quests. You can also narrow your search using a search term.
+  """Lists all available quests. 
+  You can also narrow your search using a search term.
 
     search_term: can be one of the following:
              class - one of the available quest classes(tags). 
@@ -445,88 +494,349 @@ async def list(ctx, search_term: str=None, sort_by: str=None):
   """
   pass
 
-@quest.command()
-async def info(ctx):
-  '''Help 
-   !quest info <questID> - Gives all all information currently availale about a quest 
-  '''
+@quest.command() 
+async def info(ctx, quest_id: str):
+  """Shows info about a quest listed in .quest list. 
+  You can also use this command to check the progress of quests you've accepted.
+
+  quest_id is the quest number. It can be made more specific by adding task and objective numbers separated by periods.
+ 
+  Examples:
+    .quest info 2      <-- quest 2
+    .quest info 5.2.3  <-- quest 5, task 2, objective 3
+  """
   pass
 
 @quest.command()
-async def accept(ctx):
-  '''Help 
-    !quest accept <questID> [all @ party members] - Accepts a quest either by yourself or with the mentioned members 
-  '''
-  pass
+async def accept(ctx, quest_number: int, * party_members: discord.Member):
+  """Accept a Quest by yourself or with Party Members!
 
-@quest.command()
-async def log(ctx):
-  '''Help 
-   !quest log [questID] [ .taskID]  - Gives information about a quest in progress including current completion percent/level
-  '''
+  party members must hm?
+  
+  Example:
+    .quest accept 2 @.Power @Deno
+    .quest accept 3
+  """
   pass
 
 @quest.command(name="set")
 async def quest_set(ctx):
-  '''Help 
-  !quest set <option> <questID> [value] - Edits a quest at a later point, e.g to add missed tags or increase xp reward
-  '''
+  """Commands to change options on your quests before you post them. 
+  Some options can still be changed after publishing but be considerate of Adventurers that may be taking the Quest at that time.
+  """
   pass
 
 @quest.command()
-async def claim(ctx):
-  '''Help 
-  !quest claim <questID> [ .TaskID] [decription] - Claims a quest / task is complete with description to await verification
-  '''
+async def claim(ctx, quest_id: str, description: str=None):
+  """Claim a Quest/Track with a description to await Verification!
+
+  Example:
+    .quest claim 4.3 The Diamonds are in the Mailbox!
+    .quest claim 1.2.4 <picture of music discs>
+  """
   pass
 
 @quest.command()
-async def verify(ctx):
-  '''Help 
-   !quest verify <message_id> - Verifies claims (Questmaster only)
-  '''
+@is_quest_master_or_admin()
+async def verify(ctx, *message_id: discord.Message):
+  """Verify a Claim by an adventurer.
+
+  Specify the claim to verify by writing your .quest verify message as a reply to the claim message.
+
+  In order to verify multiple claims at once, you'll need to us message ids instead of replies. Get them by right clicking the .quest claim message and clicking "Copy ID". To see this option, you may need to turn on Developer Mode in your discord settings > App Settings > Advanced.
+
+  Example:
+    .quest verify  <-- as a reply to the claim msg
+    .quest verify 919751809344622673 919761722800209961
+  """
   pass
 
 @quest.command()
 async def leaderboard(ctx):
-  '''Help 
-   !quest leaderboard [quest_name[.task_name]] - Displays leaderboard of global levelor specified quest xp
-  '''
+  """Shows You the Leaderboard of Global Level or Specified Quest XP!
+
+  Example:
+  .quest leaderboard Enchantment Table!.Diamonds!
+  """
   pass
 
 @quest.command()
 async def notify(ctx):
-  '''Help 
-    !quest notify [class|search term|quest master|"party"|"solo"] -  Notifys of quests posts matching specified parameters
-  '''
+  """Notifys Members with Quests Posts matching specified Parameters!
+
+  Example:
+  .quest notify Miner Diamonds Breazy Solo
+  """
   pass
 
 @quest.group()
 async def task(ctx):
-  """hlel
+  """Help
   """
   pass
 
 @task.command(name="add")
 async def task_add(ctx):
-  '''Help 
-   !quest task add <questID> [ .TaskID] <options> - Creates a new numbered task within a stated quest
-   '''
+  """Create a new numbered Task within a stated Quest!
+
+Example:
+.quest task add 3.1 XP50
+
+ """
   pass
 
 @task.command(name="set")
 async def task_set(ctx):
-  '''Help
- !quest task set <questID . TaskID>  - Edits a task at later point to e.g add/remove objectives or xp rewards
-   '''
+  """Allows you to edit a Task!
+
+Example:
+  .quest task set 3.2 add XP 75
+  """
   pass
 
 @task.command(name="delete")
 async def task_delete(ctx):
-  '''Help 
-  !quest task delete <questID . TaskID> - Deletes the specified task
-   '''
+  """Deletes the mentioned Task!
+
+ Example:
+ .quest delete 3.2
+  """
   pass
+
+
+TIME_PHRASE_PATTERN = re.compile(
+    r"\b(((?P<dow>mon|tue|wed|thu|fri|sat|sun)(sday|nesday|rsday|urday|day)?)|"
+    r"((?P<hour>1?[0-9])(:(?P<min>[0-5][0-9]))?\s?(?P<pm>am|pm))|"
+    r"(?P<today>today|tomorrow|yesterday)|"
+    r"((?P<th>[1-3]?[0-9])(th|st|rd|nd))|"
+    r"((?P<month>1?[0-9])\/(?P<day>[0-3]?[0-9])(\/((20)?(?P<year>[0-9]{2})))?)|"
+    r"(in (?P<rel>[0-9]+) (?P<rel_span>minute|hour|day|week)s?)|"
+    r")\b")
+
+
+def handle_time_change(change_dict, to_change, tz, future=True):
+  n = to_change
+  dow_map = {k:c for c,k in enumerate(['mon','tue','wed','thu','fri','sat','sun'])}
+  today_map = {'yesterday': -1, 'today': 0, 'tomorrow': 1}
+  if 'dow' in change_dict:
+    target = dow_map[change_dict['dow']]
+    n = n + timedelta(days=1)
+    while n.weekday() != target:
+      n = n + timedelta(days=1)
+  elif 'today' in change_dict:
+    n = n.replace(day=datetime.now().day + today_map[change_dict['today']])
+  elif 'th' in change_dict:
+    nd = n.replace(day=int(change_dict['th']))
+    if nd <= n:
+      if n.month == 12:
+        nd = nd.replace(year=n.year+1, month=1)
+      else:
+        nd = nd.replace(month=n.month+1)
+    n = nd
+  elif 'hour' in change_dict:
+    hr = int(change_dict['hour'])
+    if hr == 12:
+      hr = 0
+    if change_dict['pm'] == 'pm':
+      hr += 12
+      hr %= 24
+    mn = int(change_dict.get('min', 0))
+    nd = n.replace(hour=hr, minute=mn)
+    if future:
+      if nd < n:
+        nd += timedelta(days=1)
+    n = nd
+  elif 'month' in change_dict:
+    year = int(change_dict.get('year', datetime.now().year))
+    if year < 2000:
+      year += 2000
+    mon = int(change_dict['month'])
+    day = int(change_dict['day'])
+    n = n.replace(year=year, month=mon, day=day)
+  elif 'rel' in change_dict:
+    n = n + timedelta(**{(change_dict['rel_span']+'s'): int(change_dict['rel'])})
+  return n
+
+
+def get_hammertime_tz(ctx, author):
+  try:
+    return pytz.timezone(bot_settings['hammertime']['users'][str(author.id)])
+  except KeyError:
+    mr = set(str(r.id) for r in author.roles).intersection(bot_settings['hammertime']['roles'])
+    if mr:
+      return pytz.timezone(bot_settings['hammertime']['roles'][mr.pop()])
+    return None
+  
+REACTION_ROLE_CHANNEL="<#740139001331187775>"
+
+@bot.command(aliases=['hammerwhen'])
+async def hammertime(ctx, *, time_phrase:str=None):
+  """Stop. Hammertime.
+
+  Use this command as a reply to a non-hammertime message sent by someone.. or use it with a time phrase to be converted to hammertime.
+
+  unless specified with "yesterday" or a specific date, all dates/times are assumed to be in the future. 
+
+  Example:
+    .hammertime  <-- as a reply to a scrub
+    .hammerwhen  <-- displays a relative time
+    .hammertime sunday 1pm
+    .hammertime 4pm
+    .hammertime tomorrow at 10am
+    .hammertime 9pm on the 9th
+    .hammertime 5pm or 7pm
+    .hammertime in 6 days  <-- minutes/hours/days/weeks
+    when in doubt use this format:
+    .hammertime 1/15/2022 5:30pm
+
+  *pst: add a \ right after your .hammertime command to spit out a copyable version of the time to put in announcements n such:
+  .hammertime \ wanna get pancakes sunday at 5pm?
+  .hammertime \ <-- as a reply
+
+  credit: https://hammertime.djdavid98.art/
+  """
+  author = ctx.message.author
+  slash = time_phrase and time_phrase.startswith('\\')
+  if time_phrase is None or time_phrase == '\\':
+    if not ctx.message.reference:
+      return await ctx.reply('if no time phrase is given, you must give a replied message to hammertime.')
+    msg = await ctx.guild.get_channel(ctx.message.reference.channel_id).fetch_message(ctx.message.reference.message_id)
+    time_phrase = msg.content
+    author = msg.author
+
+  tz = get_hammertime_tz(ctx, author)
+  if tz is None:
+    return await ctx.reply(f'{author.mention} has not yet set their timezone role in {REACTION_ROLE_CHANNEL} or set their custom timzeone via `{bot.prefix}timezone`, so your guess is as good as mine.')
+
+  tp = time_phrase.lower()
+  onow = datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(tz)
+  
+  times = []
+  unfinished_times = []
+  unfinished_dates = []
+  o_time_obj = {
+    'dt': None,
+    'format': None
+  }
+  prev_time={'fmt':0, 'dt':onow}
+  prev_date={'fmt':0, 'dt':onow}
+
+  fmt_map = {
+    'dow': 'F',
+    'th': 'D',
+    'today': 'D',
+    'month': 'D',
+    'rel': 'D',
+    'hour': 't',
+  }
+  fmt_map = ('t','D','f','F')
+
+  append_dt = None
+  time_obj = deepcopy(o_time_obj)
+  for match in TIME_PHRASE_PATTERN.finditer(time_phrase):
+    found = {k:v for k,v in match.groupdict().items() if v is not None}
+    if not found:
+      continue
+    if 'rel' in found:
+      if found['rel_span'] in ('minute', 'hour'):
+        append_dt = {'fmt': 1,
+          'dt': handle_time_change(found, onow, tz)}
+      else:  # week, day
+        unfinished_dates.append({'fmt': 2,
+          'dt': handle_time_change(found, onow, tz)})
+    elif 'hour' in found:
+      unfinished_times.append({'fmt': 1,
+        'dt': handle_time_change(found, onow, tz)})
+    else:
+      unfinished_dates.append({
+        'fmt': 4 if 'dow' in found else 2,
+        'dt': handle_time_change(found, onow, tz)
+      })
+
+    if append_dt:
+      if len(unfinished_times) + len(unfinished_dates) >= 1:
+        if len(unfinished_times) == 0:
+          unfinished_times.append(prev_time)
+        elif len(unfinished_dates) == 0:
+          unfinished_dates.append(prev_date)
+      else:
+        times.append(append_dt)
+        append_dt = None
+
+    if len(unfinished_times) >= 1 and len(unfinished_dates) >= 1:
+      for tm in unfinished_times:
+        for dt in unfinished_dates:
+          prev_date = dt
+          prev_time = tm
+          times.append({
+            'dt': dt['dt'].replace(
+              hour=tm['dt'].hour, 
+              minute=tm['dt'].minute,
+              second=tm['dt'].second),
+            'fmt': min(4, dt['fmt'] + tm['fmt'])
+          })
+      unfinished_times = []
+      unfinished_dates = []
+      if append_dt:
+        times.append(append_dt)
+        append_dt = None
+
+  # stragglers
+  if len(unfinished_times) + len(unfinished_dates) >= 1:
+    if len(unfinished_times) == 0:
+      unfinished_times.append(prev_time)
+    elif len(unfinished_dates) == 0:
+      unfinished_dates.append(prev_date)
+    for tm in unfinished_times:
+      for dt in unfinished_dates:
+        times.append({
+          'dt': dt['dt'].replace(
+            hour=tm['dt'].hour, 
+            minute=tm['dt'].minute,
+            second=tm['dt'].second),
+          'fmt': min(4, dt['fmt'] + tm['fmt'])
+        })
+  
+  # for t in times:
+  #   t['dt'] = tz.localize(t['dt'])
+
+  msg = '\n'.join(
+    ('\\' if slash else '') + 
+    f"<t:{int(t['dt'].timestamp())}:{'R' if ctx.invoked_with == 'hammerwhen' else fmt_map[t['fmt']-1]}>" for t in times
+  )
+
+  if not msg:
+    return await ctx.reply(f'no time phrase was found. make sure you follow the format in `{bot.prefix}help hammertime`, you dingus.')
+
+  await ctx.reply(msg)
+  
+
+@bot.command()
+async def hammerthem(ctx, member: discord.Member):
+  """what time is it for em?"""
+  tz = get_hammertime_tz(ctx, member)
+  if not tz:
+    return await ctx.reply(f"heck if I know what time it is for em. **{member.display_name}** hasn't set their timezone yet. Yo {member.mention}, do us a favor and grab a timezone from {REACTION_ROLE_CHANNEL} or use the `{bot.prefix}timezone` command to set a custom one if your timezone isn't in that list.")
+  tm = datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(tz)
+  await ctx.reply(f"**{member.display_name}** is in **{tz}**. It's **{tm.strftime('%A, %B')} {tm.day}, {tm.year} {int(tm.strftime('%I'))}:{tm.strftime('%M %p')}** for them right now.")
+
+@bot.command()
+async def timezone(ctx, timezone: str=None):
+  """set your own timezone if it's not listed in #roles. leave timezone blank to remove it.
+  
+  Note: This overrides whatever timezone role you might have."""
+  if timezone is None:
+    if str(ctx.message.author.id) not in bot_settings['hammertime']['users']:
+      return await ctx.reply("you already don't have a timezone set.")
+    del bot_settings['hammertime']['users'][str(ctx.message.author.id)]
+    save_bot_settings()
+    return await ctx.reply('your custom timezone has been unset. If you have a timezone role set, it will be used when you use `.hammertime`.')
+  else:
+    if timezone not in pytz.all_timezones:
+      return await ctx.reply(f'{timezone} {NOT_A_TIMEZONE_MSG}')
+    bot_settings['hammertime']['users'][str(ctx.message.author.id)] = timezone
+    save_bot_settings()
+    await ctx.reply(f'Your timezone is set to **{timezone}**')
 
 
 # this runs the web server
