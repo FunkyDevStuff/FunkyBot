@@ -669,7 +669,7 @@ def get_hammertime_tz(ctx, author):
   
 REACTION_ROLE_CHANNEL="<#740139001331187775>"
 
-@bot.command(aliases=['hammerwhen'])
+@bot.command(aliases=['hammerwhen', 'ht', 'hw'])
 async def hammertime(ctx, *, time_phrase:str=None):
   """Stop. Hammertime.
 
@@ -709,6 +709,33 @@ async def hammertime(ctx, *, time_phrase:str=None):
     return await ctx.reply(f'{author.mention} has not yet set their timezone role in {REACTION_ROLE_CHANNEL} or set their custom timzeone via `{bot.prefix}timezone`, so your guess is as good as mine.')
 
   tp = time_phrase.lower()
+
+  when = ctx.invoked_with in ('hammerwhen', 'hw')
+
+  if tp.startswith((
+    'half-life 3',
+    'half life 3',
+    'halflife 3',
+    'is half-life 3 coming out',
+    'is half life 3 coming out',
+    'is halflife 3 coming out',
+    'is half life 3 coming out',
+    "green and breazy's chess match",
+    "breazy and green's chess match",
+    "green's chess match",
+    "breazy's chess match",
+    'will green and breazy do their chess match',
+    'will breazy and green do their chess match',
+    'will green do his chess match',
+    'will green do their chess match',
+    'will breazy do his chess match'
+  )):
+    if when:
+      return await ctx.send('<t:999999999999:R>')
+    else:
+      return await ctx.send('<t:999999999999>')
+    
+
   onow = datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(tz)
   
   times = []
@@ -802,7 +829,7 @@ async def hammertime(ctx, *, time_phrase:str=None):
 
   msg = '\n'.join(
     ('\\' if slash else '') + 
-    f"<t:{int(t['dt'].timestamp())}:{'R' if ctx.invoked_with == 'hammerwhen' else fmt_map[t['fmt']-1]}>" for t in times
+    f"<t:{int(t['dt'].timestamp())}:{'R' if when else fmt_map[t['fmt']-1]}>" for t in times
   )
 
   if not msg:
