@@ -13,6 +13,8 @@ from copy import deepcopy
 import traceback
 import random
 from datetime import datetime, timedelta
+from typing import List, Tuple, Union
+import asyncio
 import pytz
 import re
 
@@ -57,14 +59,20 @@ async def on_command_error(ctx, error, unhandled_by_cog=False):
   if isinstance(error, commands.MissingRequiredArgument):
     await ctx.send_help(ctx.command)
   elif isinstance(error, commands.ArgumentParsingError):
-    msg = "`{user_input}` is not a valid value for `{command}`".format(
+    try:
+      msg = "`{user_input}` is not a valid value for `{command}`".format(
         user_input=error.user_input, command=error.cmd
-    )
-    if error.custom_help_msg:
-      msg += f"\n{error.custom_help_msg}"
+      )
+      if error.custom_help_msg:
+        msg += f"\n{error.custom_help_msg}"
+    except:
+      msg = error.args[0]
     print(msg)
-    await ctx.send(msg)
-    if error.send_cmd_help:
+    await ctx.send(f'```py\n{msg}```')
+    try:
+      if error.send_cmd_help:
+        await ctx.send_help(ctx.command)
+    except:
       await ctx.send_help(ctx.command)
   elif isinstance(error, commands.ConversionError):
     if error.args:
@@ -92,6 +100,81 @@ async def on_ready():
     print(bot.user.name)
     print(bot.user.id)
     print('------')
+
+
+# from https://github.com/phenom4n4n/phen-cogs/blob/36306d29b86c9bf55b142e8bb680886d4fb2fea1/roleutils/reactroles.py#L99
+def emoji_id(emoji):
+  return emoji if isinstance(emoji, str) else str(emoji.id)
+
+async def emoji_from_id(ctx, emoji_id):
+  return (await ctx.guild.fetch_emoji(int(emoji_id))) if len(emoji_id) > 2 else emoji_id
+
+  
+async def reaction_menu(ctx, msg, emojis_add_responses, emojis_rm_responses, from_members: list=[], timeout=30, update_task=None, update_task_poll_every=2, reset_timeout_if_respond=True):
+  """turns a msg into a continuous reaction menu lasting timeout seconds.
+  reactions should be in place already before calling this
+  
+  emojis_add_responses and emojis_rm_responses should be maps between the emoji_id and callables expecting callable(reaction, user). callables should return not None to stop the reaction menu.
+
+  from_members should be a list of users to watch for or an empty list to watch for any reaction (besides the bot)
+
+  an awaitable update/display task can be given which will run during the reaction menu with update_task_poll_every second sleeps between each run
+  """
+  
+  def rcheck(emojis):
+    def check_pred(reaction, user):
+      return (
+        (
+          (not from_members) and bot.user.id != user.id or
+          (from_members and user.id in [a.id for a in from_members])
+        ) and
+        reaction.message.id == msg.id and
+        emoji_id(reaction.emoji) in emojis
+      )
+    return check_pred
+  
+  async def update():
+    while True:
+      await asyncio.sleep(update_task_poll_every)
+      await update_task()
+
+  def process(event, group):
+    async def process_pred():
+      reaction, user = await bot.wait_for(event, check=rcheck(group))
+      eid = emoji_id(reaction.emoji)
+      if eid in group:
+        return group[eid](reaction, user)
+    return process_pred
+
+
+  tasks = [
+    process('reaction_add', emojis_add_responses),
+    process('reaction_remove', emojis_rm_responses)
+  ]
+  if update_task:
+    tasks.append(update)
+
+  async def menu():
+    while True:
+      timeout_task = bot.loop.create_task(asyncio.sleep(timeout))
+      batch = [timeout_task, *[t() for t in tasks]]
+      done, pending = await asyncio.wait(batch, return_when=asyncio.FIRST_COMPLETED)
+      for p in pending:
+        p.cancel()
+      if timeout_task in done:
+        raise asyncio.exceptions.TimeoutError
+      try:
+        dp = done.pop().result()
+      except Exception as e:
+        print(e)
+      if dp is not None:
+        return dp
+
+  if reset_timeout_if_respond:
+    return await menu()
+  else:
+    return await asyncio.wait_for(menu(), timeout)
+
 
 @bot.command()
 async def add(ctx, left: int, right: int):
@@ -258,15 +341,15 @@ def int_parser(default, minv=None, maxv=None):
     try:
       v = int(s)
     except ValueError:
-      raise commands.ArgumentParsingError(f'{s} cannot be converted to a whole number')
+      raise commands.ArgumentParsingError(f'{s} cannot be converted to a whole number', s)
     if mn is None:
-      mx = v
+      mn = v
     if mx is None:
       mx = v
     if v < mn:
-      raise commands.ArgumentParsingError(f'{v} is less than the minimum value {mn}')
+      raise commands.ArgumentParsingError(f'{v} is less than the minimum value {mn}', v)
     if v > mx:
-      raise commands.ArgumentParsingError(f'{v} is greater than the maximum value {mx}')
+      raise commands.ArgumentParsingError(f'{v} is greater than the maximum value {mx}', v)
     return v
   return int_parser_pred
 
@@ -277,7 +360,7 @@ def parse_delta(s):
     return 0
   m = SPAN_PATTERN.match(s)
   if not m:
-    raise commands.ArgumentParsingError(f'{s} is not a valid timespan format.')
+    raise commands.ArgumentParsingError(f'{s} is not a valid timespan format.', s)
   n = int(m.group('amt'))
   p = m.group('span')
   if p == 'w':
@@ -293,9 +376,9 @@ def time_parser(default, minv, maxv):
       return df
     days = parse_delta(s)
     if days < mn:
-      raise commands.ArgumentParsingError(f'{s} is less than the minimum value {minv}')
+      raise commands.ArgumentParsingError(f'{s} is less than the minimum value {minv}', s)
     if days > mx:
-      raise commands.ArgumentParsingError(f'{s} is greater than the minimum value {maxv}')
+      raise commands.ArgumentParsingError(f'{s} is greater than the minimum value {maxv}', s)
     return days
   return time_parser_pred
 
@@ -310,11 +393,12 @@ def bool_parser(default):
     elif lowered in ('no', 'n', 'false', 'f', '0', 'disable', 'off'):
         return False
     else:
-      raise commands.ArgumentParsingError(f'cannot convert {s} to true/false')
+      raise commands.ArgumentParsingError(f'cannot convert {s} to true/false', s)
+  return bool_parser_pred
 
 
 QUEST_OPTION_PARSERS = {
-  "xp": int_parser(0, 0),
+  "xp": int_parser(0),
   "party": int_parser(1, 0),
   "time": time_parser('2w', '1d', '8w'),
   "expires": time_parser('2w', '1d', '4w'),
@@ -322,6 +406,15 @@ QUEST_OPTION_PARSERS = {
   "repeats": int_parser(0, 0),
   "redoes": bool_parser(False)
 } 
+ADMIN_QUEST_OPTION_PARSERS = {
+  "xp": int_parser(0),
+  "party": int_parser(1, 0),
+  "time": time_parser('2w', '0d', '8w'),
+  "expires": time_parser('2w', '0d', '4w'),
+  "progression": bool_parser(False),
+  "repeats": int_parser(0, -1),
+  "redoes": bool_parser(False)
+}
 
 def save_bot_settings():
   db['BOT_SETTINGS'] = deepcopy(bot_settings)
@@ -329,10 +422,11 @@ def save_bot_settings():
 def save_quests():
   db['QUEST_SETTINGS'] = deepcopy(quest_settings)
 
+def check_is_admin(ctx):
+  return bot_settings['admin_role'] in [r.id for r in ctx.message.author.roles]
+
 def is_admin():
-  def predicate(ctx):
-    return bot_settings['admin_role'] in [r.id for r in ctx.message.author.roles]
-  return commands.check(predicate)
+  return commands.check(check_is_admin)
 
 def is_quest_master():
   def predicate(ctx):
@@ -343,6 +437,21 @@ def is_quest_master_or_admin():
   def predicate(ctx):
     return is_quest_master()(ctx) or is_admin()(ctx)
   return commands.check(predicate)
+
+# from https://github.com/phenom4n4n/phen-cogs/blob/36306d29b86c9bf55b142e8bb680886d4fb2fea1/roleutils/converters.py#L112
+class RealEmojiConverter(commands.EmojiConverter):
+    async def convert(self, ctx: commands.Context, argument: str) -> Union[discord.Emoji, str]:
+        try:
+            emoji = await super().convert(ctx, argument)
+        except commands.BadArgument:
+            try:
+                await ctx.message.add_reaction(argument)
+            except discord.HTTPException:
+                raise commands.EmojiNotFound(argument)
+            else:
+                emoji = argument
+        return emoji
+
 
 @bot.command(name="error")
 @is_admin()
@@ -365,6 +474,83 @@ async def admin(ctx, role: discord.Role):
   bot_settings['admin_role'] = role.id
   save_bot_settings()
   await ctx.reply(f'admin role set to {role.name}')
+
+quest_tag_list_by_emoji={}
+def generate_tag_emoji_map():
+  global quest_tag_list_by_emoji
+  quest_tag_list_by_emoji = {
+    v:k for k,v in quest_settings['tags'].items()
+  }
+
+def setup_quests():
+  defaults = {
+    'tags': {}
+  }
+  changed = False
+  for k, v in defaults.items():
+    if k not in quest_settings:
+      changed = True
+      quest_settings[k] = deepcopy(v)
+  if changed:
+    save_quests()
+  generate_tag_emoji_map()
+  
+setup_quests()
+
+
+async def list_tags(ctx):
+  msg = '__**Quest Tags**__:\n'
+  split_at=3
+  i=0
+  for tag, eid in quest_settings['tags'].items():
+    i+=1
+    s = f'{await eid_convert(ctx, eid)} **{tag}**  '
+    if not i%split_at:
+      s += '\n'
+    msg += s
+  return await ctx.reply(msg)
+
+async def eid_convert(ctx, eid):
+  try:
+    eid = await emoji_from_id(ctx, eid)
+  except:
+    eid = f':{eid}:'
+  return eid
+
+
+@_set.command()
+@is_admin()
+async def questtag(ctx, tag_name: str=None, emoji: RealEmojiConverter=None):
+  """add/removes tags used in tagging quests. leave tag_name empty to list the tags"""
+  # revisit what happens to quests with tags that get removed?
+  # probably best to just save em as text and nvmd doing anything if they get removed
+  
+  if tag_name is None:
+    await list_tags(ctx)
+    return
+
+  if emoji:
+    old = quest_settings['tags'].get(tag_name)
+    quest_settings['tags'][tag_name] = emoji_id(emoji)
+    quest_settings['tags'] = {  # sort
+      i: quest_settings['tags'][i] for i in sorted(quest_settings['tags'].keys())
+    }
+    save_quests()
+    if old:
+      old = await eid_convert(ctx, old)
+      await ctx.reply(f'The emoji for the quest tag {old} **{tag_name}** was changed to {emoji}')
+    else:
+      await ctx.reply(f'{emoji} **{tag_name}** was added as a quest tag')
+  else:  # delete
+    if not quest_settings['tags'][tag_name]:
+      await ctx.reply(f'**{tag_name}** is already not a quest tag')
+    else:
+      eid = quest_settings['tags'][tag_name]
+      emoji = await eid_convert(ctx, eid)
+      del quest_settings['tags'][tag_name]
+      save_quests()
+      await ctx.reply(f'quest tag {emoji} **{tag_name}** was deleted')
+
 
 def setup_hammertime():
   if 'hammertime' not in bot_settings:
@@ -403,6 +589,25 @@ async def hammertimerole(ctx, role: discord.Role=None, timezone:str=None):
     save_bot_settings()
     return await ctx.reply(f'the **{role}** role has been added to hammertime. People with this role will now be treated as being in that timezone when using `{bot.prefix}hammertime`')
 
+
+def parse_quest_options(tokens, parsers):
+  options = {}
+  last_option_line_n = 0
+  for c, op in enumerate(tokens):
+    last_option_line_n += 1
+    if not op.strip():
+      continue
+    try:
+      key, val = [i.strip() for i in op.split('=')]
+      parser = parsers[key]
+    except:
+      break
+    else:
+      options[key] = parser(val)
+  
+  return (options, last_option_line_n)
+
+
 @bot.group()
 async def quest(ctx):
   """quest commands"""
@@ -434,6 +639,7 @@ async def new(ctx, *, options:str):
 
   available options are:
              xp - defaults to 0. bonus xp for completing the quest. 
+                  set negative to add a cost for starting the quest
           party - defaults to 1. party size required to start the quest. 
                   set to 0 for an open quest; a quest that anybody can
                   contribute to at any time.
@@ -467,11 +673,173 @@ async def new(ctx, *, options:str):
     I need me some rockets to celebrate my freedom
   """
   options = options.strip()
+  ooptions = options
   name, *options = [o.strip() for o in options.split('\n')]
+
+  parsers = QUEST_OPTION_PARSERS
+  author_type = 'quest master'
+  if check_is_admin(ctx):
+    parsers = ADMIN_QUEST_OPTION_PARSERS
+    author_type = 'Admin'
+
+
+  opt_dict, last_line = parse_quest_options(options, parsers)
+  desc = ooptions.split("\n", last_line)[-1]
+  quest = {
+    'name': name,
+    'desc': desc,
+    'options': opt_dict,
+    'tags': {},
+    'posted': False,  # None is hidden, datetime is posted time
+    'tasks': [],
+    'owner': ctx.author.id
+  }
+
+  author = ctx.author
+
+  embed = discord.Embed(
+    title=f'_. {name}',
+    description=desc,
+    color=author.color
+  )
+
+  def expire_fmt(v):
+    if not v:
+      return ''
+    now = datetime.now()
+    expires = (quest['posted'] or now) + timedelta(days=v)
+    left = expires - now
+
+    span = 'day'
+    amt = left.days
+    if left.days >= 7*2:
+      amt//=7
+      span = 'week'
+    elif amt <= 1:
+      amt=left.total_seconds()/60
+      span = 'minute'
+      if amt > 59:
+        amt//=60
+        span = 'hour'
+    
+    if amt > 1:
+      span += 's'
+    
+    return f'quest expires in __{amt} {span}__'
+    
+
+  option_fmt = {
+    'party': lambda v: '***open** quest*' if v<1 else '*solo quest*' if v<2 else f'*party size: **{v}***',
+    'time': lambda v: f'time limit: **{v if v%7 else v//7} {"day" if v%7 else "week"}{"" if v in (1,7) else "s"}**' if v else "",
+    'expires': expire_fmt,
+    'tasks': lambda v: f'0/{len(v)} tasks' if len(v) else '',
+    'xp': lambda v: f'xp: **{v}**',  # add task xp and xp cost later
+  }
+
+  ext_opt = {**opt_dict, 'tasks': quest['tasks']}
+
+  embed.add_field(
+    name='Details',
+    value='\n'.join(filter(None, [
+      v(ext_opt[k]) for k, v in option_fmt.items() if k in ext_opt
+    ]))
+  )
   
+  async def gen_footer():
+    ft = f'{author.display_name} • {author_type}'
+    if quest['tags']:
+      el = ''.join([await emoji_from_id(ctx, quest_settings['tags'][t]) for t in quest['tags'] if t in quest_settings['tags']])
+      ft += f'  |  {el}'
+    return ft
 
-  await ctx.send(f'name: {name}\noptions: {options}')
+  footer_txt = await gen_footer()
 
+  embed.set_footer(
+    text=footer_txt
+  )
+
+  msg = await ctx.reply(f"\**Review your quest before creating it as creating it uses up a quest number.**\n\n"
+  f"Click on tag(s) you'd like to add to your quest by clicking on the corresponding reactions (You can see the list of tags and their names with `{bot.prefix}quest listtags`).\n"
+  f"Once the tags are set, hit the ✅ to create the quest or ❌ to cancel.\n\n"
+  f"Once created, you can still change settings and add tasks before you post your quest by using the `{bot.prefix}quest set` and `{bot.prefix}quest task` commands.\n"
+  f"Finally, post your quest with `{bot.prefix}quest post`."
+    ,embed=embed)
+
+  curry_quest_stuff={
+    'tags': set(quest['tags']),
+    'create': None,
+    'emojis': []
+  }
+  
+  def create(reaction, user):
+    curry_quest_stuff['create'] = True
+    return True
+  
+  def cancel(reaction, user):
+    curry_quest_stuff['create'] = False
+    return False
+  
+  def add_tag(tag):
+    def add_tag_pred(reaction, user):
+      quest['tags'][tag] = True
+      quest['tags'] = {i: quest['tags'][i] for i in sorted(quest['tags'].keys())}
+    return add_tag_pred
+  
+  def rm_tag(tag):
+    def rm_tag_pred(reaction, user):
+      if tag in quest['tags']:
+        del quest['tags'][tag]
+    return rm_tag_pred
+  
+  responses = {
+    '✅': create,
+    '❌': cancel,
+  }
+  rm_responses = {}
+  emojis = []
+  for t, eid in quest_settings['tags'].items():
+    try:
+      em = await emoji_from_id(ctx, eid)
+    except Exception as e:
+      print(e)
+    else:
+      responses[eid]    = add_tag(t)
+      rm_responses[eid] = rm_tag(t)
+      curry_quest_stuff['emojis'].append(em)
+  
+  curry_quest_stuff['emojis'].append('✅')
+  curry_quest_stuff['emojis'].append('❌')
+
+  async def update_embed():
+    while curry_quest_stuff['emojis']:
+      await msg.add_reaction(curry_quest_stuff['emojis'][0])
+      curry_quest_stuff['emojis'].pop(0)
+    
+    if set(quest['tags']) != curry_quest_stuff['tags']:
+      embed.set_footer(text=await gen_footer())
+      curry_quest_stuff['tags'] = set(quest['tags'])
+      await msg.edit(embed=embed)
+  
+  try:
+    await reaction_menu(
+      ctx, msg, 
+      responses, 
+      rm_responses, 
+      from_members=[author], 
+      update_task=update_embed, 
+      update_task_poll_every=1,
+      reset_timeout_if_respond=True,
+    )
+  except asyncio.exceptions.TimeoutError:
+    pass
+  
+  await ctx.send(str(curry_quest_stuff))
+    
+
+@quest.command()
+async def listtags(ctx):
+  """Lists available tags for quests. Think one should be added? Ask an admin to add it!"""
+  await list_tags(ctx)
 
 @quest.command()
 async def list(ctx, search_term: str=None, sort_by: str=None):
@@ -693,9 +1061,13 @@ async def hammertime(ctx, *, time_phrase:str=None):
   .hammertime \ wanna get pancakes sunday at 5pm?
   .hammertime \ <-- as a reply
 
+  **pst: put a @mention in your .hammertime command to use their timezone instead. this doesn't work with replies though.
+
   credit: https://hammertime.djdavid98.art/
   """
-  author = ctx.message.author
+  author = ctx.message.author  
+  if ctx.message.mentions:
+    author = ctx.message.mentions[0]
   slash = time_phrase and time_phrase.startswith('\\')
   if time_phrase is None or time_phrase == '\\':
     if not ctx.message.reference:
@@ -760,7 +1132,7 @@ async def hammertime(ctx, *, time_phrase:str=None):
 
   append_dt = None
   time_obj = deepcopy(o_time_obj)
-  for match in TIME_PHRASE_PATTERN.finditer(time_phrase):
+  for match in TIME_PHRASE_PATTERN.finditer(tp):
     found = {k:v for k,v in match.groupdict().items() if v is not None}
     if not found:
       continue
