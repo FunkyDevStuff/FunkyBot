@@ -404,7 +404,8 @@ QUEST_OPTION_PARSERS = {
   "expires": time_parser('2w', '1d', '4w'),
   "progression": bool_parser(False),
   "repeats": int_parser(0, 0),
-  "redoes": bool_parser(False)
+  "redoes": bool_parser(False),
+  "retries": int_parser(0, 0)
 } 
 ADMIN_QUEST_OPTION_PARSERS = {
   "xp": int_parser(0),
@@ -413,7 +414,8 @@ ADMIN_QUEST_OPTION_PARSERS = {
   "expires": time_parser('2w', '0d', '4w'),
   "progression": bool_parser(False),
   "repeats": int_parser(0, -1),
-  "redoes": bool_parser(False)
+  "redoes": bool_parser(False),
+  "retries": int_parser(0, -1)
 }
 
 def save_bot_settings():
@@ -521,7 +523,7 @@ async def eid_convert(ctx, eid):
 @_set.command()
 @is_admin()
 async def questtag(ctx, tag_name: str=None, emoji: RealEmojiConverter=None):
-  """add/removes tags used in tagging quests. leave tag_name empty to list the tags"""
+  """add/removes tags used in tagging quests. leave tag_name empty to list the tags. leave emoji empty to delete the tag"""
   # revisit what happens to quests with tags that get removed?
   # probably best to just save em as text and nvmd doing anything if they get removed
   
@@ -639,7 +641,7 @@ async def new(ctx, *, options:str):
 
   available options are:
              xp - defaults to 0. bonus xp for completing the quest. 
-                  set negative to add a cost for starting the quest
+                  set negative to add a cost for starting the quest.
           party - defaults to 1. party size required to start the quest. 
                   set to 0 for an open quest; a quest that anybody can
                   contribute to at any time.
@@ -656,7 +658,11 @@ async def new(ctx, *, options:str):
                   (admins can set this to -1 to allow infinite repeats)
          redoes - defaults to no. when a quest has repeats, this option 
                   specifies whether an adventurer is allowed to take the 
-                  quest again.
+                  quest again after completing it.
+        retries - defaults to 0. the number of retries a party will 
+                  have after exceeding the quest's time limit before 
+                  the quest returns to the quest board.
+                  (admins can set this to -1 for infinite retries)
   
   examples:
     .quest new Dog Bones
@@ -692,7 +698,10 @@ async def new(ctx, *, options:str):
     'tags': {},
     'posted': False,  # None is hidden, datetime is posted time
     'tasks': [],
-    'owner': ctx.author.id
+    'owner': ctx.author.id,
+    'playing': {}, #  uid: oqid
+    'played': {},
+    'taken': 0  # how many times or if open, how many players
   }
 
   author = ctx.author
@@ -703,7 +712,7 @@ async def new(ctx, *, options:str):
     color=author.color
   )
 
-  def expire_fmt(v):
+  def expire_fmt(v, f):
     if not v:
       return ''
     now = datetime.now()
@@ -726,14 +735,22 @@ async def new(ctx, *, options:str):
       span += 's'
     
     return f'quest expires in __{amt} {span}__'
-    
+  
+  def time_fmt(v, f):
+    if not v:
+      return ""
+    s = f'time limit: **{v if v%7 else v//7} {"day" if v%7 else "week"}{"" if v in (1,7) else "s"}**'
+    r = f.get('retries', 0)
+    if r:
+      s += f" ({'infinite' if r<0 else r} retr{'y' if r==1 else 'ies'})"
+    return s
 
   option_fmt = {
-    'party': lambda v: '***open** quest*' if v<1 else '*solo quest*' if v<2 else f'*party size: **{v}***',
-    'time': lambda v: f'time limit: **{v if v%7 else v//7} {"day" if v%7 else "week"}{"" if v in (1,7) else "s"}**' if v else "",
+    'party': lambda v,f: '***open** quest*' if v<1 else '*solo quest*' if v<2 else f'*party size: **{v}***',
+    'time': time_fmt,
     'expires': expire_fmt,
-    'tasks': lambda v: f'0/{len(v)} tasks' if len(v) else '',
-    'xp': lambda v: f'xp: **{v}**',  # add task xp and xp cost later
+    'tasks': lambda v,f: f'0/{len(v)} tasks' if len(v) else '',
+    'xp': lambda v,f: f'xp **cost**: **{v}**' if v <0 else f'xp: **{v}**' if v else "",  # add task xp and xp cost later
   }
 
   ext_opt = {**opt_dict, 'tasks': quest['tasks']}
@@ -741,15 +758,22 @@ async def new(ctx, *, options:str):
   embed.add_field(
     name='Details',
     value='\n'.join(filter(None, [
-      v(ext_opt[k]) for k, v in option_fmt.items() if k in ext_opt
+      v(ext_opt[k], ext_opt) for k, v in option_fmt.items() if k in ext_opt
     ]))
   )
+
+  async def gen_desc():
+    s = quest['desc']
+    if quest['tags']:
+      el = ''.join([str(await emoji_from_id(ctx, quest_settings['tags'][t])) for t in quest['tags'] if t in quest_settings['tags']])
+      s = f'{s}\n\n{el}'
+    return s
   
   async def gen_footer():
     ft = f'{author.display_name} • {author_type}'
-    if quest['tags']:
-      el = ''.join([await emoji_from_id(ctx, quest_settings['tags'][t]) for t in quest['tags'] if t in quest_settings['tags']])
-      ft += f'  |  {el}'
+    # if quest['tags']:
+    #   el = ''.join([str(await emoji_from_id(ctx, quest_settings['tags'][t])) for t in quest['tags'] if t in quest_settings['tags']])
+    #   ft += f'  |  {el}'
     return ft
 
   footer_txt = await gen_footer()
@@ -816,7 +840,8 @@ async def new(ctx, *, options:str):
       curry_quest_stuff['emojis'].pop(0)
     
     if set(quest['tags']) != curry_quest_stuff['tags']:
-      embed.set_footer(text=await gen_footer())
+      embed.description = await gen_desc()
+      # embed.set_footer(text=await gen_footer())
       curry_quest_stuff['tags'] = set(quest['tags'])
       await msg.edit(embed=embed)
   
@@ -826,6 +851,7 @@ async def new(ctx, *, options:str):
       responses, 
       rm_responses, 
       from_members=[author], 
+      timeout=60*3,
       update_task=update_embed, 
       update_task_poll_every=1,
       reset_timeout_if_respond=True,
@@ -833,7 +859,23 @@ async def new(ctx, *, options:str):
   except asyncio.exceptions.TimeoutError:
     pass
   
-  await ctx.send(str(curry_quest_stuff))
+  if curry_quest_stuff['create'] is None:
+    return await msg.reply(f"took too long to respond to this. The **{name}** quest wasn't created")
+  
+  if curry_quest_stuff['create'] is False:
+    return await msg.reply(f"**{name}** quest creation canceled.")
+  
+  qn = 1
+  s = (
+    f"You've created quest **{qn}**, the **{name}** quest!\n\n"
+  
+    f"You can adjust it using the `{bot.prefix}quest set` commands or add tasks using `{bot.prefix}quest tast add {qn}`.\nOnce you're happy with your quest, post it for all adventurers to see with `{bot.prefix}quest post {qn}`!")
+  if opt_dict.get('xp', 0) == 0:
+    s += f"\n\nNOTE: No xp bonus is given for completing this quest. Make sure to add xp in your quest's task objectives before posting it."
+  elif opt_dict['xp'] < 0:
+    s += f"\n\nNOTE: This quest costs xp for adventurers to take. Make sure your adventurers gain xp by the end of the quest by adding xp to your quest's task objectives."
+
+  await ctx.send(s)
     
 
 @quest.command()
