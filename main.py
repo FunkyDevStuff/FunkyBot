@@ -106,8 +106,8 @@ async def on_ready():
 def emoji_id(emoji):
   return emoji if isinstance(emoji, str) else str(emoji.id)
 
-async def emoji_from_id(ctx, emoji_id):
-  return (await ctx.guild.fetch_emoji(int(emoji_id))) if len(emoji_id) > 2 else emoji_id
+async def emoji_from_id(guild, emoji_id):
+  return (await guild.fetch_emoji(int(emoji_id))) if len(emoji_id) > 2 else emoji_id
 
   
 async def reaction_menu(ctx, msg, emojis_add_responses, emojis_rm_responses, from_members: list=[], timeout=30, update_task=None, update_task_poll_every=2, reset_timeout_if_respond=True):
@@ -424,11 +424,13 @@ def save_bot_settings():
 def save_quests():
   db['QUEST_SETTINGS'] = deepcopy(quest_settings)
 
-def check_is_admin(ctx):
-  return bot_settings['admin_role'] in [r.id for r in ctx.message.author.roles]
+def check_is_admin(member):
+  return bot_settings['admin_role'] in [r.id for r in member.roles]
 
 def is_admin():
-  return commands.check(check_is_admin)
+  def _is_admin(ctx):
+    return check_is_admin(ctx.message.author)
+  return commands.check(_is_admin)
 
 def is_quest_master():
   def predicate(ctx):
@@ -514,7 +516,7 @@ async def list_tags(ctx):
 
 async def eid_convert(ctx, eid):
   try:
-    eid = await emoji_from_id(ctx, eid)
+    eid = await emoji_from_id(ctx.guild, eid)
   except:
     eid = f':{eid}:'
   return eid
@@ -628,6 +630,106 @@ async def master_role(ctx, role: discord.Role=None):
   else:
     await ctx.send('quest master role has been unset')
 
+async def _gen_desc(quest, author):
+  s = quest['desc']
+  if quest['tags']:
+    el = ''.join([str(await emoji_from_id(author.guild, quest_settings['tags'][t])) for t in quest['tags'] if t in quest_settings['tags']])
+    s = f'{s}\n\n{el}'
+  return s
+
+async def new_quest_embed(quest, author, task=None):
+  name = quest['name']
+  desc = await _gen_desc(quest, author)
+
+  author_type = 'quest master'
+  if check_is_admin(author):
+    author_type = 'Admin'
+
+  embed = discord.Embed(
+    title=f'_. {name}',
+    description=desc,
+    color=author.color
+  )
+
+  def expire_fmt(v, f):
+    if not v:
+      return ''
+    now = datetime.now()
+    expires = (quest['posted'] or now) + timedelta(days=v)
+    left = expires - now
+
+    span = 'day'
+    amt = left.days
+    if left.days >= 7*2:
+      amt//=7
+      span = 'week'
+    elif amt <= 1:
+      amt=left.total_seconds()/60
+      span = 'minute'
+      if amt > 59:
+        amt//=60
+        span = 'hour'
+    
+    if amt > 1:
+      span += 's'
+    
+    return f'quest expires in __{amt} {span}__'
+  
+  def time_fmt(v, f):
+    if not v:
+      return ""
+    s = f'time limit: **{v if v%7 else v//7} {"day" if v%7 else "week"}{"" if v in (1,7) else "s"}**'
+    r = f.get('retries', 0)
+    if r:
+      s += f" ({'infinite' if r<0 else r} retr{'y' if r==1 else 'ies'})"
+    return s
+  
+  def xp_fmt(v, f):
+    task_xp = sum([
+      t.get('xp',0) + sum(o['xp'] for o in t.get('objectives',[]))
+      for t in f['tasks']
+    ])
+    
+    bonus = max(0, v)
+    total_xp = bonus + task_xp
+    s = f'reward: **{total_xp} xp**'
+    if v < 0:
+      s = f'`cost: {v} xp`\n' + s
+    return s
+
+  option_fmt = {
+    'party': lambda v,f: '***open** quest*' if v<1 else '*solo quest*' if v<2 else f'*party size: **{v}***',
+    'time': time_fmt,
+    'expires': expire_fmt,
+    'tasks': lambda v,f: f'0/{len(v)} tasks' if len(v) else '',
+    'xp': xp_fmt,
+  }
+
+  ext_opt = {**quest['options'], 'tasks': quest['tasks']}
+
+  embed.add_field(
+    name='Details',
+    value='\n'.join(filter(None, [
+      v(ext_opt[k], ext_opt) for k, v in option_fmt.items() if k in ext_opt
+    ]))
+  )
+  
+  async def gen_footer():
+    ft = f'{author.display_name} • {author_type}'
+    # if quest['tags']:
+    #   el = ''.join([str(await emoji_from_id(ctx, quest_settings['tags'][t])) for t in quest['tags'] if t in quest_settings['tags']])
+    #   ft += f'  |  {el}'
+    return ft
+
+  footer_txt = await gen_footer()
+
+  embed.set_footer(
+    text=footer_txt
+  )
+
+  return embed
+
+
 @quest.command()
 @is_quest_master_or_admin()
 async def new(ctx, *, options:str):
@@ -683,11 +785,8 @@ async def new(ctx, *, options:str):
   name, *options = [o.strip() for o in options.split('\n')]
 
   parsers = QUEST_OPTION_PARSERS
-  author_type = 'quest master'
-  if check_is_admin(ctx):
+  if check_is_admin(ctx.message.author):
     parsers = ADMIN_QUEST_OPTION_PARSERS
-    author_type = 'Admin'
-
 
   opt_dict, last_line = parse_quest_options(options, parsers)
   desc = ooptions.split("\n", last_line)[-1]
@@ -706,81 +805,7 @@ async def new(ctx, *, options:str):
 
   author = ctx.author
 
-  embed = discord.Embed(
-    title=f'_. {name}',
-    description=desc,
-    color=author.color
-  )
-
-  def expire_fmt(v, f):
-    if not v:
-      return ''
-    now = datetime.now()
-    expires = (quest['posted'] or now) + timedelta(days=v)
-    left = expires - now
-
-    span = 'day'
-    amt = left.days
-    if left.days >= 7*2:
-      amt//=7
-      span = 'week'
-    elif amt <= 1:
-      amt=left.total_seconds()/60
-      span = 'minute'
-      if amt > 59:
-        amt//=60
-        span = 'hour'
-    
-    if amt > 1:
-      span += 's'
-    
-    return f'quest expires in __{amt} {span}__'
-  
-  def time_fmt(v, f):
-    if not v:
-      return ""
-    s = f'time limit: **{v if v%7 else v//7} {"day" if v%7 else "week"}{"" if v in (1,7) else "s"}**'
-    r = f.get('retries', 0)
-    if r:
-      s += f" ({'infinite' if r<0 else r} retr{'y' if r==1 else 'ies'})"
-    return s
-
-  option_fmt = {
-    'party': lambda v,f: '***open** quest*' if v<1 else '*solo quest*' if v<2 else f'*party size: **{v}***',
-    'time': time_fmt,
-    'expires': expire_fmt,
-    'tasks': lambda v,f: f'0/{len(v)} tasks' if len(v) else '',
-    'xp': lambda v,f: f'xp **cost**: **{v}**' if v <0 else f'xp: **{v}**' if v else "",  # add task xp and xp cost later
-  }
-
-  ext_opt = {**opt_dict, 'tasks': quest['tasks']}
-
-  embed.add_field(
-    name='Details',
-    value='\n'.join(filter(None, [
-      v(ext_opt[k], ext_opt) for k, v in option_fmt.items() if k in ext_opt
-    ]))
-  )
-
-  async def gen_desc():
-    s = quest['desc']
-    if quest['tags']:
-      el = ''.join([str(await emoji_from_id(ctx, quest_settings['tags'][t])) for t in quest['tags'] if t in quest_settings['tags']])
-      s = f'{s}\n\n{el}'
-    return s
-  
-  async def gen_footer():
-    ft = f'{author.display_name} • {author_type}'
-    # if quest['tags']:
-    #   el = ''.join([str(await emoji_from_id(ctx, quest_settings['tags'][t])) for t in quest['tags'] if t in quest_settings['tags']])
-    #   ft += f'  |  {el}'
-    return ft
-
-  footer_txt = await gen_footer()
-
-  embed.set_footer(
-    text=footer_txt
-  )
+  embed = await new_quest_embed(quest, author)
 
   msg = await ctx.reply(f"\**Review your quest before creating it as creating it uses up a quest number.**\n\n"
   f"Click on tag(s) you'd like to add to your quest by clicking on the corresponding reactions (You can see the list of tags and their names with `{bot.prefix}quest listtags`).\n"
@@ -820,10 +845,9 @@ async def new(ctx, *, options:str):
     '❌': cancel,
   }
   rm_responses = {}
-  emojis = []
   for t, eid in quest_settings['tags'].items():
     try:
-      em = await emoji_from_id(ctx, eid)
+      em = await emoji_from_id(ctx.guild, eid)
     except Exception as e:
       print(e)
     else:
@@ -840,7 +864,7 @@ async def new(ctx, *, options:str):
       curry_quest_stuff['emojis'].pop(0)
     
     if set(quest['tags']) != curry_quest_stuff['tags']:
-      embed.description = await gen_desc()
+      embed.description = await _gen_desc(quest, author)
       # embed.set_footer(text=await gen_footer())
       curry_quest_stuff['tags'] = set(quest['tags'])
       await msg.edit(embed=embed)
@@ -860,7 +884,7 @@ async def new(ctx, *, options:str):
     pass
   
   if curry_quest_stuff['create'] is None:
-    return await msg.reply(f"took too long to respond to this. The **{name}** quest wasn't created")
+    return await msg.reply(f"took too long to respond. The **{name}** quest wasn't created.")
   
   if curry_quest_stuff['create'] is False:
     return await msg.reply(f"**{name}** quest creation canceled.")
