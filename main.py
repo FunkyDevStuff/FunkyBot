@@ -46,6 +46,11 @@ if 'QUEST_SETTINGS' not in db.keys():
 
 quest_settings = deepcopy(db['QUEST_SETTINGS'])
 
+if 'ONGOING_QUESTS' not in db.keys():
+  db['ONGOING_QUESTS'] = {}
+
+ongoing_quests = deepcopy(db['ONGOING_QUESTS'])
+
 # handle command errors
 async def on_command_error(ctx, error, unhandled_by_cog=False):
   if not unhandled_by_cog:
@@ -417,6 +422,16 @@ ADMIN_QUEST_OPTION_PARSERS = {
   "redoes": bool_parser(False),
   "retries": int_parser(0, -1)
 }
+QUEST_OPTION_DEFAULTS = {
+  "xp": 0,
+  "party": 1,
+  "time": 14,
+  "expires": 14,
+  "progression": False,
+  "repeats": 0,
+  "redoes": False,
+  "retries": 0,
+}
 
 def save_bot_settings():
   db['BOT_SETTINGS'] = deepcopy(bot_settings)
@@ -456,6 +471,22 @@ class RealEmojiConverter(commands.EmojiConverter):
                 emoji = argument
         return emoji
 
+def questPartConverterFactory(max_depth=3):
+  class QuestPartConverter(commands.Converter):
+    async def convert(self, ctx: commands.Context, argument: str):
+      types = ['quest', 'task', 'objective']
+      if argument.count('.') >= max_depth:
+        raise commands.BadArgument(f'can only select up to {types[max_depth-1]}')
+      try:
+        parse_quest_id(argument)
+      except:
+        raise commands.BadArgument(f'{argument} is not the right format')
+
+      tp = types[argument.count('.')]
+      q = resolve_quest_id(argument)
+      return (q, tp)
+  return QuestPartConverter
+
 
 @bot.command(name="error")
 @is_admin()
@@ -488,7 +519,10 @@ def generate_tag_emoji_map():
 
 def setup_quests():
   defaults = {
-    'tags': {}
+    'tags': {},
+    'quests': {},
+    'quest_counter': 1,
+    'ongoing_quest_counter': 1
   }
   changed = False
   for k, v in defaults.items():
@@ -502,7 +536,7 @@ def setup_quests():
 setup_quests()
 
 
-async def list_tags(ctx):
+async def gen_tag_list(ctx):
   msg = '__**Quest Tags**__:\n'
   split_at=3
   i=0
@@ -512,6 +546,10 @@ async def list_tags(ctx):
     if not i%split_at:
       s += '\n'
     msg += s
+  return msg
+
+async def list_tags(ctx):
+  msg = await gen_tag_list(ctx)
   return await ctx.reply(msg)
 
 async def eid_convert(ctx, eid):
@@ -607,10 +645,31 @@ def parse_quest_options(tokens, parsers):
     except:
       break
     else:
-      options[key] = parser(val)
+      parsed = parser(val)
+    if not QUEST_OPTION_DEFAULTS[key] == parsed:
+      options[key] = parser(val)  
   
   return (options, last_option_line_n)
 
+
+def parse_quest_id(s):
+  """fails if it's not in 1.2.3 format"""
+  ns = s.split('.')
+  ins = [int(i) for i in ns]
+  return [ns[0], *ins[1:]]
+    
+def resolve_quest_id(s):
+  ids = parse_quest_id(s)
+  ret = quest_settings
+  keys = ['quests', 'tasks', 'objs']
+  try:
+    for i, key in zip(ids, keys):
+      ret = ret[key][i]
+  except:
+    tps = ['quest', 'task', 'objective']
+    tp = tps[s.count('.')][:-1]
+    raise KeyError(f"can't find {tp} {s}")
+  return ret
 
 @bot.group()
 async def quest(ctx):
@@ -637,16 +696,18 @@ async def _gen_desc(quest, author):
     s = f'{s}\n\n{el}'
   return s
 
-async def new_quest_embed(quest, author, task=None):
+async def new_quest_embed(quest, guild, task=None):
   name = quest['name']
+  author = guild.get_member(int(quest['owner']))
   desc = await _gen_desc(quest, author)
 
   author_type = 'quest master'
   if check_is_admin(author):
     author_type = 'Admin'
 
+  qn = quest.get('id', '_')
   embed = discord.Embed(
-    title=f'_. {name}',
+    title=f'{qn}. {name}',
     description=desc,
     color=author.color
   )
@@ -797,7 +858,7 @@ async def new(ctx, *, options:str):
     'tags': {},
     'posted': False,  # None is hidden, datetime is posted time
     'tasks': [],
-    'owner': ctx.author.id,
+    'owner': str(ctx.author.id),
     'playing': {}, #  uid: oqid
     'played': {},
     'taken': 0  # how many times or if open, how many players
@@ -805,7 +866,7 @@ async def new(ctx, *, options:str):
 
   author = ctx.author
 
-  embed = await new_quest_embed(quest, author)
+  embed = await new_quest_embed(quest, ctx.guild)
 
   msg = await ctx.reply(f"\**Review your quest before creating it as creating it uses up a quest number.**\n\n"
   f"Click on tag(s) you'd like to add to your quest by clicking on the corresponding reactions (You can see the list of tags and their names with `{bot.prefix}quest listtags`).\n"
@@ -889,7 +950,12 @@ async def new(ctx, *, options:str):
   if curry_quest_stuff['create'] is False:
     return await msg.reply(f"**{name}** quest creation canceled.")
   
-  qn = 1
+  qn = quest_settings['quest_counter']
+  quest_settings['quest_counter'] += 1
+  quest_settings['quests'][str(qn)] = quest
+  quest['id'] = qn
+  save_quests()
+
   s = (
     f"You've created quest **{qn}**, the **{name}** quest!\n\n"
   
@@ -929,7 +995,7 @@ async def list(ctx, search_term: str=None, sort_by: str=None):
   pass
 
 @quest.command() 
-async def info(ctx, quest_id: str):
+async def info(ctx, quest_id: questPartConverterFactory(3)):
   """Shows info about a quest listed in .quest list. 
   You can also use this command to check the progress of quests you've accepted.
 
@@ -939,10 +1005,15 @@ async def info(ctx, quest_id: str):
     .quest info 2      <-- quest 2
     .quest info 5.2.3  <-- quest 5, task 2, objective 3
   """
-  pass
+  quest, item_type = quest_id
+
+  embed = await new_quest_embed(quest, ctx.guild)
+
+  await ctx.reply(embed=embed)
+
 
 @quest.command()
-async def accept(ctx, quest_number: int, * party_members: discord.Member):
+async def accept(ctx, quest_number: questPartConverterFactory(1), * party_members: discord.Member):
   """Accept a Quest by yourself or with Party Members!
 
   party members must hm?
@@ -954,11 +1025,87 @@ async def accept(ctx, quest_number: int, * party_members: discord.Member):
   pass
 
 @quest.command(name="set")
-async def quest_set(ctx):
-  """Commands to change options on your quests before you post them. 
+async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, value):
+  """Change options on your quests before you post them.
+
   Some options can still be changed after publishing but be considerate of Adventurers that may be taking the Quest at that time.
+
+  tags is a valid option. When setting tags with this command, specify all tags you want to use by tag name (not emoji) separated by commas
+
+  use the .quest task commands to edit tasks
   """
-  pass
+  quest, _ = quest_number
+  author = ctx.message.author
+  admin = check_is_admin(author)
+  not_owner = quest['owner'] != str(author.id)
+  ovalue = value
+
+  if not_owner and not admin:
+    return await ctx.reply('You are not the quest master that posted this quest')
+
+  option = option.lower()
+
+  if option == 'tags':
+    tags = [t.strip() for t in value.split(',')]
+    not_tags = set(tags) - set(quest_settings['tags'])
+    if not_tags:
+      s = await gen_tag_list(ctx)
+      return await ctx.reply(
+        f'{", ".join(not_tags)} ' + 
+        'are not valid tags' if len(not_tags)>1 else 'is not a valid tag' +
+        f'. Choose from the following (make sure you use tag names, not emojis):\n\n{s}')
+    else:
+      value = {t: True for t in sorted(tags)}
+      target = quest
+  else:
+    parsers = QUEST_OPTION_PARSERS
+    if check_is_admin(ctx.message.author):
+      parsers = ADMIN_QUEST_OPTION_PARSERS
+    try:
+      value = parsers[option](value)
+    except Exception as e:
+      return await ctx.reply(f'{ovalue} is not a valid option for {option}!')
+
+    target = quest['options']
+  
+  # you sure?
+  also = ''
+  if not_owner and admin:
+    also = '\n' + ctx.guild.get_member(int(quest['owner'])).mention
+    msg = await ctx.reply('You are not the creator of this quest, are you sure you want to change these options?')
+    curry_quest_stuff = {'agree': False}
+
+    def create(reaction, user):
+      curry_quest_stuff['agree'] = True
+      return True
+    
+    def cancel(reaction, user):
+      curry_quest_stuff['agree'] = False
+      return False
+    
+    responses = {'✅': create, '❌': cancel}
+    await msg.add_reaction('✅')
+    await msg.add_reaction('❌')
+    try:
+      await reaction_menu(
+        ctx, msg, responses, {}, from_members=[author]
+      )
+    except asyncio.exceptions.TimeoutError:
+      pass
+    if not curry_quest_stuff['agree']:
+      return await ctx.send('change canceled')
+
+  if str(target.get(option, QUEST_OPTION_DEFAULTS.get(option))) == str(value):
+    return await ctx.reply(f'{option} is already set to {ovalue}')
+  
+  if value == QUEST_OPTION_DEFAULTS.get(option, None):
+    del target[option]
+  else:
+    target[option] = value
+  save_quests()
+
+  await ctx.reply(f"**{quest['id']}**. **{quest['name']}**: **{option}** set to **{ovalue}**" + also)
+  
 
 @quest.command()
 async def claim(ctx, quest_id: str, description: str=None):
