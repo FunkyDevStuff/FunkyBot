@@ -510,6 +510,60 @@ async def admin(ctx, role: discord.Role):
   save_bot_settings()
   await ctx.reply(f'admin role set to {role.name}')
 
+@bot.group()
+@is_admin()
+async def role(ctx):
+  """admin role commands"""
+  if ctx.invoked_subcommand is None:
+    await ctx.send_help(ctx.command)
+
+async def give_take_role_from_everyone(ctx, role, give=True, reason=None, update_msg_fmt=""):
+  lmem = len(ctx.guild.members)
+  msg = await ctx.reply(update_msg_fmt.format(0))
+  
+  progress = {'n': 0}
+
+  async def do_roles():
+    for m in ctx.guild.members[progress['n']:]:
+      if give:
+        await m.add_roles(role, reason=reason)
+      else:
+        await m.remove_roles(role, reason=reason)
+      progress['n'] += 1
+  
+  while progress['n'] < lmem:
+    try:
+      await asyncio.wait_for(do_roles(), 5)
+    except asyncio.exceptions.TimeoutError:
+      await msg.edit(content=update_msg_fmt.format(progress['n']))
+    else:
+      await msg.edit(content=update_msg_fmt.format(progress['n']) + '. Done!')
+      break
+
+@role.command()
+async def giveall(ctx, role: discord.Role, *, reason):
+  """give a role to everyone. A reason must be specified for the audit log"""
+  if not reason:
+    await ctx.reply('make sure to give a reason for adding this role to everyone')
+
+  lmem = len(ctx.guild.members)
+  fmt = (f"This is gonna take awhile.. {role} added to "
+         "{}" 
+         f"/{lmem} members")
+  await give_take_role_from_everyone(ctx, role, reason=reason, update_msg_fmt=fmt)
+
+@role.command()
+async def takeall(ctx, role: discord.Role, *, reason):
+  """take away a role from everyone. A reason must be specified for the audit log"""
+  if not reason:
+    await ctx.reply('make sure to give a reason for taking this role from everyone')
+
+  lmem = len(ctx.guild.members)
+  fmt = (f"This is gonna take awhile.. {role} removed from "
+         "{}" 
+         f"/{lmem} members")
+  await give_take_role_from_everyone(ctx, role, give=False, reason=reason, update_msg_fmt=fmt)
+
 quest_tag_list_by_emoji={}
 def generate_tag_emoji_map():
   global quest_tag_list_by_emoji
