@@ -14,6 +14,9 @@ import traceback
 import random
 from datetime import datetime, timedelta
 from typing import List, Tuple, Union
+import textwrap
+from contextlib import redirect_stdout
+import io
 import asyncio
 import pytz
 import re
@@ -24,6 +27,7 @@ There are a number of utility commands being showcased here.'''
 
 intents = discord.Intents.default()
 intents.members = True
+intents.presences = True
 
 PREFIX = '.'
 bot = commands.Bot(command_prefix=PREFIX, description=description, intents=intents, owner_id=owner_id)
@@ -1503,6 +1507,148 @@ async def timezone(ctx, timezone: str=None):
     bot_settings['hammertime']['users'][str(ctx.message.author.id)] = timezone
     save_bot_settings()
     await ctx.reply(f'Your timezone is set to **{timezone}**')
+
+eval_data = {'_last_result': None}
+
+# from Red
+def cleanup_code(content):
+    """removes code blocks from content string."""
+    # remove ```py\n```
+    if content.startswith('```') and content.endswith('```'):
+        return '\n'.join(content.split('\n')[1:-1])
+
+    # remove `foo`
+    return content.strip('` \n')
+
+@bot.command(hidden=True, name='eval')
+@commands.is_owner()
+async def _eval(ctx, *, body: str):
+    """Evaluates some code in an async function"""
+
+    env = {
+        'bot': bot,
+        'ctx': ctx,
+        'channel': ctx.channel,
+        'author': ctx.author,
+        'guild': ctx.guild,
+        'message': ctx.message,
+        '_': eval_data['_last_result']
+    }
+
+    env.update(globals())
+
+    body = cleanup_code(body)
+    stdout = io.StringIO()
+
+    to_compile = f'async def func():\n{textwrap.indent(body, "  ")}'
+
+    try:
+        exec(to_compile, env)
+    except Exception as e:
+        return await ctx.send(f'```py\n{e.__class__.__name__}: {e}\n```')
+
+    func = env['func']
+    try:
+        with redirect_stdout(stdout):
+            ret = await func()
+    except Exception as e:
+        value = stdout.getvalue()
+        await ctx.send(f'```py\n{value}{traceback.format_exc()}\n```')
+    else:
+        value = stdout.getvalue()
+        try:
+            await ctx.message.add_reaction('\u2705')
+        except:
+            pass
+
+        if ret is None:
+            if value:
+                await ctx.send(f'```py\n{value}\n```')
+        else:
+            eval_data['_last_result'] = ret
+            await ctx.send(f'```py\n{value}{ret}\n```')
+
+
+# repost app
+@bot.listen()
+async def on_message(msg):
+  # EasyApplication Bot in some hidden application channel
+  if msg.author.id == 737539715854761994 and msg.channel.id == 801202454460760094:
+    # submitted-apps channel
+    target = msg.guild.get_channel(924764896929939506)
+    if msg.embeds:
+      for em in msg.embeds:
+        m = await target.send(embed=em)
+      for r in '👍👎✅❌':
+        await m.add_reaction(r)
+      # applicant_id = msg.embeds[0].description.split('<@')[-1].split('>')[0]
+      # applicant_reaction_msg = m.id
+
+playing_msgs = {}
+
+ON_MINECRAFT_ROLE_ID = 925600205859074160
+
+# member playing minecraft
+@bot.listen()
+async def on_member_update(before, after):
+  bacts = sorted([a.name for a in before.activities])
+  aacts = sorted([a.name for a in after.activities])
+  if str(bacts) == str(aacts):
+    return
+  action = None
+  emote = '✅'
+  if 'Minecraft' in bacts and 'Minecraft' not in aacts:
+    emote = '💔'
+    action = '`stopped`'
+  if 'Minecraft' not in bacts and 'Minecraft' in aacts:
+    action = '__started__'
+  if action is None:
+    return
+  
+  log_channel = before.guild.get_channel(811317212535062539)
+  name = after.mention
+  if check_is_admin(after):
+    name = after.name
+  tz = get_hammertime_tz(None, after)
+  their_time = ''
+  
+  if tz:
+    tm = datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(tz)
+    their_time = f" (**{tm.strftime('%A')} {int(tm.strftime('%I'))}:{tm.strftime('%M %p')}** their time)."
+
+  s = f"{emote} {name} **{action}** at <t:{int(datetime.now().timestamp())}:F>{their_time}"
+  # msg = playing_msgs.get(after.id)
+  # if 'stopped' in action and msg:
+  #   await msg.edit(msg.content + '\n' + s)
+  # else:
+  await log_channel.send(s)
+
+  # On Minecraft role
+  role = after.guild.get_role(ON_MINECRAFT_ROLE_ID)
+  if 'stopped' in action:
+    await after.remove_roles(role)
+  else:
+    await after.add_roles(role)
+
+
+@bot.listen()
+async def on_ready():
+  # reset On Minecraft role members
+  funky = bot.get_guild(675822019144712247)
+  on_minecraft_role = funky.get_role(ON_MINECRAFT_ROLE_ID)
+  marked = on_minecraft_role.members
+
+  for m in funky.members:
+    playing = 'Minecraft' in [a.name for a in m.activities]
+    if playing:
+      if m not in marked:
+        await m.add_roles(on_minecraft_role)
+    else:
+      if m in marked:
+        await m.remove_roles(on_minecraft_role)
+
+
+
 
 
 # this runs the web server
