@@ -444,7 +444,7 @@ def save_quests():
   db['QUEST_SETTINGS'] = deepcopy(quest_settings)
 
 def check_is_admin(member):
-  return bot_settings['admin_role'] in [r.id for r in member.roles]
+  return bot_settings['admin_role'] in [r.id for r in member.roles] or member.id == owner_id
 
 def is_admin():
   def _is_admin(ctx):
@@ -824,7 +824,11 @@ async def new_quest_embed(quest, guild, task=None):
     'xp': xp_fmt,
   }
 
-  ext_opt = {**quest['options'], 'tasks': quest['tasks']}
+  ext_opt = {
+    'party': QUEST_OPTION_DEFAULTS['party'],
+    **quest['options'], 
+    'tasks': quest['tasks']
+  }
 
   embed.add_field(
     name='Details',
@@ -1115,6 +1119,12 @@ async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, 
     else:
       value = {t: True for t in sorted(tags)}
       target = quest
+  elif option in ('title', 'name'):
+    option = 'name'
+    target = quest
+  elif option in ('desc', 'description'):
+    option = 'desc'
+    target = quest
   else:
     parsers = QUEST_OPTION_PARSERS
     if check_is_admin(ctx.message.author):
@@ -1162,7 +1172,11 @@ async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, 
     target[option] = value
   save_quests()
 
-  await ctx.reply(f"**{quest['id']}**. **{quest['name']}**: **{option}** set to **{ovalue}**" + also)
+  disp_val = f'**{ovalue}**'
+  if option == 'desc':
+    disp_val = ovalue
+
+  await ctx.reply(f"**{quest['id']}**. **{quest['name']}**: **{option}** set to {disp_val}" + also)
   
 
 @quest.command()
@@ -1591,8 +1605,8 @@ ON_MINECRAFT_ROLE_ID = 925600205859074160
 # member playing minecraft
 @bot.listen()
 async def on_member_update(before, after):
-  bacts = sorted([a.name for a in before.activities])
-  aacts = sorted([a.name for a in after.activities])
+  bacts = sorted([a.name or str(a) for a in before.activities])
+  aacts = sorted([a.name or str(a) for a in after.activities])
   if str(bacts) == str(aacts):
     return
   action = None
