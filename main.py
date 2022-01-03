@@ -491,9 +491,103 @@ def questPartConverterFactory(max_depth=3):
       return (q, tp)
   return QuestPartConverter
 
+TASK_BLURB_PATTERN = r"(<name>.*)(\nxp=)?"
+
+class TaskConverter(commands.Converter):
+  async def convert(self, ctx: commands.Context, task_blurb: str):
+    task = {
+      'objectives': [],
+      'desc': '',
+      'xp': 0,
+    }
+    try:
+      title, rest = task_blurb.split('\n', 1)
+    except:
+      task['name'] = task_blurb.strip()
+      return task
+    task['name'] = title
+
+    title = title.strip()
+    rest = rest.strip()
+
+    if rest.startswith('xp='):
+      rest = rest.split('xp=')[1]
+      xp, *rest = rest.split('\n', 1)
+      xp = int(xp.strip())
+      if xp < 0:
+        raise commands.BadArgument(f'xp cannot be negative')
+      task['xp'] = xp
+      if not rest:
+        return task
+      rest = rest[0]
+
+    pn = 0
+    desc = ''
+    desc_done=False
+    objs = []
+    obj = {}
+    while True:
+      last = False
+      try:
+        n = rest.index('\n', pn)
+      except:
+        line = rest[pn:]
+        last = True
+      else:
+        line = rest[pn:n].strip()
+      line = line.strip()
+      if line.startswith('-'):
+        if not desc_done:
+          desc = rest[:pn].strip()
+          desc_done = True
+        else:
+          obj['desc'] = rest[:pn].strip()
+          objs.append(obj)
+        obj = {'xp': 0}
+        rest = rest[pn:].strip()
+        rest = rest[1:]
+        pn = 0
+        if last:
+          obj['desc'] = rest.strip()
+          objs.append(obj)
+          break
+        continue
+      if '-' in line:
+        xp, objst = line.split('-',1)
+        no = {}
+        try:
+          no['xp'] = int(xp)
+        except:
+          pass
+        else:
+          if not desc_done:
+            desc = rest[:pn].strip()
+            desc_done = True
+          else:
+            obj['desc'] = rest[:pn].strip()
+            objs.append(obj)
+          obj = no
+          rest = rest[pn:].strip()
+          rest = rest[line.index('-')+1:]
+          pn = 0
+          if last:
+            obj['desc'] = rest.strip()
+            objs.append(obj)
+            break
+          continue
+      pn = n+1
+      if last:
+        obj['desc'] = rest.strip()
+        objs.append(obj)
+        break
+
+    task['desc'] = desc
+    task['objectives'] = objs
+    return task
+
 
 @bot.command(name="error")
-@is_admin()
+# @is_admin()
 async def _error(ctx):
   """display the bot's last exception"""
   await ctx.reply(f'```py\n{bot._last_exception}```')
@@ -609,6 +703,9 @@ async def gen_tag_list(ctx):
 async def list_tags(ctx):
   msg = await gen_tag_list(ctx)
   return await ctx.reply(msg)
+
+async def emoji_from_tag(ctx, tag):
+  return await eid_convert(ctx, quest_settings['tags'][tag])
 
 async def eid_convert(ctx, eid):
   try:
@@ -754,9 +851,12 @@ async def _gen_desc(quest, author):
     s = f'{s}\n\n{el}'
   return s
 
+def get_quest_author(quest, guild):
+  return guild.get_member(int(quest['owner']))
+
 async def new_quest_embed(quest, guild, task=None):
   name = quest['name']
-  author = guild.get_member(int(quest['owner']))
+  author = get_quest_author(quest, guild)
   desc = await _gen_desc(quest, author)
 
   author_type = 'quest master'
@@ -852,7 +952,21 @@ async def new_quest_embed(quest, guild, task=None):
 
   return embed
 
+def quest_is_available(quest):
+  if not quest['posted']:
+    return False
+  if datetime.now().timestamp() > quest['posted']:
+    return False
+  return True
 
+def get_quest_xp(quest):
+  task_xp = sum([
+      t.get('xp',0) + sum(o['xp'] for o in t.get('objectives',[]))
+      for t in quest['tasks']
+  ])
+  qxp = max(quest['options'].get('xp', 0), 0)
+  return task_xp + qxp
+  
 @quest.command()
 @is_quest_master_or_admin()
 async def new(ctx, *, options:str):
@@ -1036,7 +1150,11 @@ async def listtags(ctx):
   await list_tags(ctx)
 
 @quest.command()
-async def list(ctx, search_term: str=None, sort_by: str=None):
+async def list(ctx):
+  """Lists all available quests.
+  """
+  # just ignoring all the search stuff for now
+  # async def list(ctx, search_term: str=None, sort_by: str=None):
   """Lists all available quests. 
   You can also narrow your search using a search term.
 
@@ -1054,7 +1172,35 @@ async def list(ctx, search_term: str=None, sort_by: str=None):
              party - quests with highest party size first.
 
   """
-  pass
+  quests = ''
+  for i, q in quest_settings['quests'].items():
+    if not quest_is_available(q):
+      # continue
+      pass
+    quests += f"**{i}**. __**{q['name']}**__\n\u200c \u200c \u200c "
+    pn = q['options'].get('party', 1) 
+    if pn == 0:
+      quests += '***open***'
+    elif pn == 1:
+      quests += '*solo*'
+    else:
+      quests += '🧙‍♂️ ' + str(q['options']['party'])
+    quests += f" | {get_quest_xp(q)} xp"
+    if q['tags']:
+      quests += " | " + ''.join([str(await emoji_from_tag(ctx, t)) for t in q['tags']])
+    quests += '\n'
+
+  embed = discord.Embed(
+    title=f'FunkyCraft Quest Board',
+    description=quests
+  )
+  await ctx.reply(embed=embed)
+  # embed.add_field(
+  #   name='Details',
+  #   value='\n'.join(filter(None, [
+  #     v(ext_opt[k], ext_opt) for k, v in option_fmt.items() if k in ext_opt
+  #   ]))
+  # )
 
 @quest.command() 
 async def info(ctx, quest_id: questPartConverterFactory(3)):
@@ -1204,39 +1350,99 @@ async def verify(ctx, *message_id: discord.Message):
   """
   pass
 
-@quest.command()
-async def leaderboard(ctx):
-  """Shows You the Leaderboard of Global Level or Specified Quest XP!
+# @quest.command()
+# async def leaderboard(ctx):
+#   """Shows You the Leaderboard of Global Level or Specified Quest XP!
 
-  Example:
-  .quest leaderboard Enchantment Table!.Diamonds!
-  """
-  pass
+#   Example:
+#   .quest leaderboard Enchantment Table!.Diamonds!
+#   """
+#   pass
 
-@quest.command()
-async def notify(ctx):
-  """Notifys Members with Quests Posts matching specified Parameters!
+# @quest.command()
+# async def notify(ctx):
+#   """Notifys Members with Quests Posts matching specified Parameters!
 
-  Example:
-  .quest notify Miner Diamonds Breazy Solo
-  """
-  pass
+#   Example:
+#   .quest notify Miner Diamonds Breazy Solo
+#   """
+#   pass
+
+def gen_task_embed(task, guild):
+  q = quest_settings['quests'][str(task['qid'])]
+  try:
+    tn = q['tasks'].index(task) + 1
+  except:
+    tn = len(q['tasks']) + 1
+  
+  desc = task['desc']
+  if task['xp']:
+    desc += f'\n**{task["xp"]}** Bonus XP once completed 🎉'
+  objs = task['objectives']
+  space = "\u200c "
+  if objs:
+    desc += '\n\n__**Objectives:**__'
+    for c, ob in enumerate(objs):
+      start = f"{space*2}**{c+1}.** {space}"
+      ms = start
+      ms += ob['desc']
+      if ob['xp']:
+        ms += f" ({ob['xp']} xp)"
+      
+      ms, *subs_lines = ms.split('\n')
+      ms = textwrap.fill(ms, width=80, initial_indent='', subsequent_indent=f'{space*10}')
+      if subs_lines:
+        ms += '\n' + '\n'.join(textwrap.fill(l, width=80, initial_indent=f'{space*10}', subsequent_indent=f'{space*10}') for l in subs_lines)
+      
+      desc += '\n' + ms
+      
+
+    # for l in o[1].split()
+    #  + '\n'.join(f"{space*2}**.{c+1}** " + (f"({o[0]} xp) " if o[0] else "") + '\n'.join([l for l in enumerate(o[1].split('\n')]) for c, o in enumerate(objs))
+
+  embed = discord.Embed(
+    title=f"Task {task['qid']}.{tn} {task['name']}",
+    description=desc,
+    color=get_quest_author(q, guild).color
+  )
+  return embed
+
+
 
 @quest.group()
 async def task(ctx):
-  """Help
+  """commands for managing quest tasks
   """
   pass
 
 @task.command(name="add")
-async def task_add(ctx):
-  """Create a new numbered Task within a stated Quest!
+async def task_add(ctx, quest_number: questPartConverterFactory(1), *, task_blurb: TaskConverter):
+  """adds a new task to the specified quest.
 
-Example:
-.quest task add 3.1 XP50
+  write tasks in the following format:
 
- """
-  pass
+  <title>
+  [xp=task bonus xp]
+  [description]
+  [objective list]
+  
+  objectives should be in the format:
+  [xp for completing objective]-<objective description>
+
+  Example:
+    .quest task add 3 Firework Ingredients
+    xp=20
+    We'll need fireworks to celebrate
+    20-1s gunpowder
+    hint: ghasts or creepers
+    10-1s paper
+    -1s worth of assorted dyes
+  """
+  quest, _ = quest_number
+  task = task_blurb
+  task['qid'] = quest['id']
+  embed = gen_task_embed(task, ctx.guild)
+  await ctx.reply(embed=embed)
 
 @task.command(name="set")
 async def task_set(ctx):
@@ -1662,8 +1868,71 @@ async def on_ready():
         await m.remove_roles(on_minecraft_role)
 
 
+@bot.command()
+async def quote(ctx):
+  """power's a dumb dumb"""
+  if not ctx.message.reference:
+    await ctx.reply("Ya gotta reply to a message")
+  else:
+    reply = ctx.message.reference
+    msg_ = await ctx.fetch_message((reply.message_id))
+    await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " ')
+
+@bot.command( name='quotetime')
+async def quoteWithTime(ctx):
+  """power's a big dumb dumb"""
+  if not ctx.message.reference:
+    await ctx.reply("Ya gotta reply to a message")
+  else:
+    reply = ctx.message.reference
+    msg_ = await ctx.fetch_message((reply.message_id))
+    msg_time = (msg_.created_at)
+    await ctx.send({msg_time})
+    #await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " ')
+
+@bot.command()
+async def doot(ctx):
+  """Doot, thats it """
+  await ctx.send(f' Daily <@396794458378731520> Doot \n ')
+
+@bot.command()
+async def nerd(ctx):
+  """Reply to someone and call them a nerd"""
+  if not ctx.message.reference:
+    await ctx.reply("Reply to a message. nerd")
+  else:
+    nerdReply = ctx.message.reference
+    nerdMsg_ = await ctx.fetch_message((nerdReply.message_id))
+    await ctx.send(f">>> <@{nerdMsg_.author.id}> You're a Nerd ")
+    
+@bot.listen() # <-- this is an event listener instead of a command
+async def on_ready():  # <-- wait for the bot to be ready
+  # if 'restart_counter' doesn't exist in the db, put in an initial value
+  if 'restart_counter' not in bot_settings:
+    bot_settings['restart_counter'] = 1
+    save_bot_settings()
+  else: # otherwise, increment it
+    bot_settings['restart_counter'] += 1
+    save_bot_settings()
+
+# copied from stack overflow :P
+# https://stackoverflow.com/a/16671271
+def number_th(n):
+    """puts st, nd, rd, th at the end of numbers"""
+    return str(n)+("th" if 4<=n%100<=20 else {1:"st",2:"nd",3:"rd"}.get(n%10, "th"))
+
+@bot.command()
+async def deaths(ctx):
+  """how many times my creators have killed me and revived me"""
+  await ctx.reply(f"Help me D: this is the {number_th(bot_settings['restart_counter'])} time my creators have killed me!")
 
 
+##### PLACES TO GET INFO #####
+# dir(my_thing) - lists the attributes in my_thing
+# help(my_thing) - displays help for my_thing
+# discord api reference - https://discordpy.readthedocs.io/ - use this instead of dir/help for discord objects
+# python visualization - https://pythontutor.com/ - use this to follow your program step by step and see what's going on
+# google
 
 # this runs the web server
 server.keep_alive()
