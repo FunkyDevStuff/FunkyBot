@@ -18,6 +18,7 @@ import textwrap
 from contextlib import redirect_stdout
 import io
 import asyncio
+import aiohttp
 import pytz
 import re
 
@@ -110,6 +111,16 @@ async def on_ready():
     print(bot.user.id)
     print('------')
 
+@bot.listen()
+async def on_error(event, *args):
+  print('event: ---')
+  print(event)
+  print('args: ----')
+  print(args)
+  # if isinstance(error, commands.MissingRequiredArgument)
+    # await aiohttp.get(f'https://BotRestarter.funkydevs.repl.co?callback={urllib.parse.quote_plus("https://FunkyBot.funkydevs.repl.co")}')
+    # os.system('kill 1')
+    
 
 # from https://github.com/phenom4n4n/phen-cogs/blob/36306d29b86c9bf55b142e8bb680886d4fb2fea1/roleutils/reactroles.py#L99
 def emoji_id(emoji):
@@ -1807,6 +1818,9 @@ async def on_message(msg):
 playing_msgs = {}
 
 ON_MINECRAFT_ROLE_ID = 925600205859074160
+ON_MINCREAFT_LOG_CHANNEL = 811317212535062539
+FUNKY = 675822019144712247
+
 
 # member playing minecraft
 @bot.listen()
@@ -1825,7 +1839,7 @@ async def on_member_update(before, after):
   if action is None:
     return
   
-  log_channel = before.guild.get_channel(811317212535062539)
+  log_channel = before.guild.get_channel(ON_MINCREAFT_LOG_CHANNEL)
   name = after.mention
   if check_is_admin(after):
     name = after.name
@@ -1858,15 +1872,53 @@ async def on_ready():
   on_minecraft_role = funky.get_role(ON_MINECRAFT_ROLE_ID)
   marked = on_minecraft_role.members
 
+  start_players = []
+  end_players = []
   for m in funky.members:
     playing = 'Minecraft' in [a.name for a in m.activities]
+
     if playing:
       if m not in marked:
+        start_players.append(m)
         await m.add_roles(on_minecraft_role)
     else:
       if m in marked:
+        end_players.append(m)
         await m.remove_roles(on_minecraft_role)
 
+  if start_players or end_players:
+    s = f'**I missed a few changes while I was offline.** I noticed these changes at <t:{int(datetime.now().timestamp())}:F>'
+    log_channel = bot.get_guild(FUNKY).get_channel(ON_MINCREAFT_LOG_CHANNEL)
+    utc_now = datetime.utcnow()
+    if start_players:
+      s += '\n\n✅ __Players playing Minecraft since I went offline:__'
+      for p in start_players:
+        name = p.mention
+        if check_is_admin(p):
+          name = p.name
+        tz = get_hammertime_tz(None, p)
+        their_time = ''
+        
+        if tz:
+          tm = utc_now.replace(tzinfo=pytz.utc).astimezone(tz)
+          their_time = f" (**{tm.strftime('%A')} {int(tm.strftime('%I'))}:{tm.strftime('%M %p')}** their time)."
+
+        s += f"\n{name}{their_time}"
+    if end_players:
+      s += '\n\n💔 __Players `stopped` playing Minecraft since I went offline:__'
+      for p in start_players:
+        name = p.mention
+        if check_is_admin(p):
+          name = p.name
+        tz = get_hammertime_tz(None, p)
+        their_time = ''
+        
+        if tz:
+          tm = utc_now.replace(tzinfo=pytz.utc).astimezone(tz)
+          their_time = f" (**{tm.strftime('%A')} {int(tm.strftime('%I'))}:{tm.strftime('%M %p')}** their time)."
+
+        s += f"\n{name}{their_time}"
+    await log_channel.send(s)
 
 @bot.command()
 async def quote(ctx):
@@ -1926,6 +1978,14 @@ async def deaths(ctx):
   """how many times my creators have killed me and revived me"""
   await ctx.reply(f"Help me D: this is the {number_th(bot_settings['restart_counter'])} time my creators have killed me!")
 
+async def ghost_doot():
+  doots = [
+    'Doot','Ily Foxo' 
+    'dooot', 'd o o t', 'DoooOOOooot', 'dwoot', 'I am Sir DootsAlot III', 'doot doot','https://tenor.com/view/pingu-noot-noot-not-noot-sit-gif-21639411',
+    'https://cdn.discordapp.com/attachments/922128872722546688/926970135586148383/dooot.gif'
+  ]
+  await bot.get_guild(675822019144712247).get_channel(922128872722546688).send(random.choice(doots))
+bot.ghost_doot = ghost_doot
 
 ##### PLACES TO GET INFO #####
 # dir(my_thing) - lists the attributes in my_thing
@@ -1935,6 +1995,9 @@ async def deaths(ctx):
 # google
 
 # this runs the web server
-server.keep_alive()
+server.keep_alive(bot)
+
+bot.bot_settings = bot_settings
+bot.quest_settings = quest_settings
 
 bot.run(my_secret, reconnect=True) # <-- reconnects if it disconnects
