@@ -21,6 +21,7 @@ import asyncio
 import aiohttp
 import pytz
 import re
+import json
 
 description = '''An example bot to showcase the discord.ext.commands extension
 module.
@@ -34,6 +35,51 @@ PREFIX = '.'
 bot = commands.Bot(command_prefix=PREFIX, description=description, intents=intents, owner_id=owner_id)
 
 bot.prefix = PREFIX
+
+##### setting up persistent data that isn't reliant on replit db size limit #####
+DATA_FOLDER = 'data/'
+# put your data names here followed by default values they should be. if those defaults aren't there, the bot will add them when it restarts. it only checks one level deep though.
+DATA_FILES_DEFAULTS = {
+  'custom_commands': {
+    'triggers': {}
+  },
+}
+
+bot.data = {}
+
+# from Red
+def _read_json(filename):
+    with open(filename, encoding='utf-8', mode="r") as f:
+        data = json.load(f)
+    return data
+
+def _save_json(filename, data):
+    with open(filename, encoding='utf-8', mode="w") as f:
+        json.dump(data, f, indent=4,sort_keys=True,
+            separators=(',',' : '))
+    return data
+
+if not os.path.exists(DATA_FOLDER):
+  os.mkdir(DATA_FOLDER)
+
+for fn, defaults in DATA_FILES_DEFAULTS.items():
+  if not os.path.exists(DATA_FOLDER + fn + '.json'):
+    _save_json(DATA_FOLDER + fn + '.json', defaults)
+
+def save_data(fn):
+  if fn not in DATA_FILES_DEFAULTS:
+    raise FileNotFoundError("that data file doesn't exist")
+  data = bot.data[fn]
+  _save_json(DATA_FOLDER + fn + '.json', data)
+
+for fn in DATA_FILES_DEFAULTS:
+  data = DATA_FILES_DEFAULTS[fn]
+  from_json = _read_json(DATA_FOLDER + fn + '.json')
+  # set defaults, override w/ the actual data
+  data = {**data, **from_json}
+  bot.data[fn] = data
+  
+##### data setup end. use save_data to save changes to bot.data #####
 
 
 BOT_DEFAULT_SETTINGS = {'admin_role': None}
@@ -195,6 +241,34 @@ async def reaction_menu(ctx, msg, emojis_add_responses, emojis_rm_responses, fro
   else:
     return await asyncio.wait_for(menu(), timeout)
 
+async def wait_for_reaction_response(ctx, msg_or_msg_str, reactions, from_members=[], timeout=None):
+  """wait for a single reaction to be clicked on a message. adds the reactions if not there. if msg_or_msg_str is a string, it sends the message. returns the emoji or None if they don't respond by timeout"""
+  msg = msg_or_msg_str
+  if msg_or_msg_str.content is None:
+    msg = await ctx.send(msg_or_msg_str)
+  
+  for r in reactions:
+    try:
+      await msg.add_reaction(r)
+    except:  # assumes it was just there already but could also be permissions
+      pass
+
+  response = {}
+  def reaction_curry(r):
+    def radd(_, __):
+      response['r'] = r
+      return r
+    return radd
+  adds = {r: reaction_curry(r) for r in reactions}
+
+  opts = {}
+  if timeout:
+    opts = {'timeout': timeout}
+  try:
+    await reaction_menu(ctx, msg, adds, {}, from_members, **opts)
+  except asyncio.TimeoutError:
+    return None
+  return response['r']
 
 @bot.command()
 async def add(ctx, left: int, right: int):
@@ -267,11 +341,12 @@ async def joined(ctx, member: discord.Member):
 #     """Is the bot cool?"""
 #     await ctx.send('Yes, the bot is cool.')
 
+# example of using an argument/parameter instead:
 @bot.command()
 async def cool(ctx, member=None):
   """Says if a user is cool."""
   if member is None:
-    member = ctx.message.author
+    member = ctx.message.author.display_name
 
   # if member was a mention, it would show up in here. 
   # we'll just grab the first one
@@ -830,6 +905,8 @@ def resolve_quest_id(s):
   keys = ['quests', 'tasks', 'objs']
   try:
     for i, key in zip(ids, keys):
+      if key != 'quests':
+        i -= 1
       ret = ret[key][i]
   except:
     tps = ['quest', 'task', 'objective']
@@ -1160,8 +1237,8 @@ async def listtags(ctx):
   """Lists available tags for quests. Think one should be added? Ask an admin to add it!"""
   await list_tags(ctx)
 
-@quest.command()
-async def list(ctx):
+@quest.command(name="list")
+async def q_list(ctx):
   """Lists all available quests.
   """
   # just ignoring all the search stuff for now
@@ -1225,8 +1302,10 @@ async def info(ctx, quest_id: questPartConverterFactory(3)):
     .quest info 5.2.3  <-- quest 5, task 2, objective 3
   """
   quest, item_type = quest_id
-
-  embed = await new_quest_embed(quest, ctx.guild)
+  if item_type == 'quest':
+    embed = await new_quest_embed(quest, ctx.guild)
+  elif item_type == 'task':
+    embed = gen_task_embed(quest, ctx.guild)
 
   await ctx.reply(embed=embed)
 
@@ -1453,7 +1532,22 @@ async def task_add(ctx, quest_number: questPartConverterFactory(1), *, task_blur
   task = task_blurb
   task['qid'] = quest['id']
   embed = gen_task_embed(task, ctx.guild)
-  await ctx.reply(embed=embed)
+  msg = await ctx.reply("How's this?", embed=embed)
+  resp = await wait_for_reaction_response(
+      ctx, msg, ['✅', '❌'], 
+      from_members=[ctx.message.author],
+      timeout=60*2
+  )
+  if resp is None:
+    return await msg.reply("Took too long to react. Try again later")
+  if resp != '✅':
+    await msg.edit(content="Canceled.", embed=None)
+    return
+  quest['tasks'].append(task)
+  save_quests()
+  await ctx.send(f"Task {quest['id']}.{len(quest['tasks'])} added.")
+
+
 
 @task.command(name="set")
 async def task_set(ctx):
@@ -1921,31 +2015,22 @@ async def on_ready():
     await log_channel.send(s)
 
 @bot.command()
-async def quote(ctx):
+async def quote(ctx, time = None):
   """power's a dumb dumb"""
   if not ctx.message.reference:
     await ctx.reply("Ya gotta reply to a message")
+  reply = ctx.message.reference
+  msg_ = await ctx.fetch_message((reply.message_id))
+  if time != None:
+    msg_time = int((msg_.created_at).timestamp())
+    await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " \n <t:{msg_time}:F>')
   else:
-    reply = ctx.message.reference
-    msg_ = await ctx.fetch_message((reply.message_id))
     await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " ')
-
-@bot.command( name='quotetime')
-async def quoteWithTime(ctx):
-  """power's a big dumb dumb"""
-  if not ctx.message.reference:
-    await ctx.reply("Ya gotta reply to a message")
-  else:
-    reply = ctx.message.reference
-    msg_ = await ctx.fetch_message((reply.message_id))
-    msg_time = (msg_.created_at)
-    await ctx.send({msg_time})
-    #await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " ')
-
+    
 @bot.command()
 async def doot(ctx):
   """Doot, thats it """
-  await ctx.send(f' Daily <@396794458378731520> Doot \n ')
+  await ctx.send(f' Daily <@396794458378731520> Doot')
 
 @bot.command()
 async def nerd(ctx):
@@ -1956,7 +2041,93 @@ async def nerd(ctx):
     nerdReply = ctx.message.reference
     nerdMsg_ = await ctx.fetch_message((nerdReply.message_id))
     await ctx.send(f">>> <@{nerdMsg_.author.id}> You're a Nerd ")
-    
+
+@bot.group(aliases=['cc'])
+async def customcommand(ctx):
+  """add custom phrases n such to the bot"""
+  if ctx.invoked_subcommand is None:
+    await ctx.send_help(ctx.command)
+
+@customcommand.command(name='list')
+async def cc_list(ctx):
+  """list the custom phrases the bot has. add more using customcommand set."""
+  clist = bot.data['custom_commands']['triggers']
+  s = textwrap.fill('  '.join([t for t in clist]), width=80)
+  if not s:
+    s = '[none]'
+  await ctx.send(f'__**Custom Commands**__\n>>> **{s}**')
+
+@customcommand.command(name='set', aliases=['add'])
+@is_admin()
+async def cc_set(ctx, trigger, *, phrase):
+  """sets/adds a custom phrase to the bot. a list of these can be seen with customcommands list and can be used using the bot prefix followed by the custom command trigger."""
+  trigger = trigger.lower()
+  if phrase is None:
+    return await ctx.reply("the phrase can't be empty")
+  if trigger in [c.name.lower() for c in bot.commands]:
+    return await ctx.reply("the trigger can't be an existing command")
+  clist = bot.data['custom_commands']['triggers']
+  if trigger in clist:
+    resp = await wait_for_reaction_response(
+      ctx, f"**{trigger}** is already a custom command trigger. replace it?", 
+      ['✅', '❌'], from_members=[ctx.message.author],
+      timeout=15
+    )
+    if resp is None:
+      return await ctx.send("took too long to react. try again later")
+    if resp != '✅':
+      return
+  clist[trigger] = phrase
+  save_data('custom_commands')
+  await ctx.reply(f"**{trigger}** added as a custom command. type `{bot.prefix}{trigger}` to use it!")
+
+@customcommand.command(name='remove', aliases=['rm'])
+@is_admin()
+async def cc_rm(ctx, trigger):
+  clist = bot.data['custom_commands']['triggers']
+  if trigger not in clist:
+    return await ctx.reply(f"**{trigger}** is not a custom command")
+  del clist[trigger]
+  save_data('custom_commands')
+  await ctx.reply(f"the custom command **{trigger}** was deleted.")
+
+@bot.listen('on_message')
+async def cc_on_message(msg):
+  if not msg.content.startswith(bot.prefix):
+    return
+  mc = msg.content[len(bot.prefix):]
+  clist = bot.data['custom_commands']['triggers']
+  try:
+    cmd = clist[mc.split(None, 1)[0]]
+  except:
+    return
+  await msg.reply(cmd)
+
+@bot.command()
+async def poll(ctx, *reactions: RealEmojiConverter):
+  """adds the reactions listed so you can be a part of the poll too. You can also use it to make yourself feel like ppl read and respond to your messages"""
+  if not reactions:
+    return await ctx.reply('you must specify some emojis to add')
+  if len(reactions) > 10:
+    return await ctx.reply(f"yo, {len(reactions)} reactions is excessive.")
+  try:
+    await ctx.message.clear_reactions()
+  except:
+    for r in reactions:
+      await ctx.message.remove_reaction(r, bot.user)
+  # copied this from you green, thats plagarism
+  if not ctx.message.reference:
+    return await ctx.reply("Ya gotta reply to a message")
+  reply = ctx.message.reference
+  msg = await ctx.fetch_message(reply.message_id)
+  for r in reactions:
+    try:
+      await msg.add_reaction(r)
+    except:
+      pass
+
+
+
 @bot.listen() # <-- this is an event listener instead of a command
 async def on_ready():  # <-- wait for the bot to be ready
   # if 'restart_counter' doesn't exist in the db, put in an initial value
@@ -1980,12 +2151,15 @@ async def deaths(ctx):
 
 async def ghost_doot():
   doots = [
-    'Doot','Ily Foxo' 
+    'Doot','Ily Foxo', 
     'dooot', 'd o o t', 'DoooOOOooot', 'dwoot', 'I am Sir DootsAlot III', 'doot doot','https://tenor.com/view/pingu-noot-noot-not-noot-sit-gif-21639411',
     'https://cdn.discordapp.com/attachments/922128872722546688/926970135586148383/dooot.gif'
   ]
   await bot.get_guild(675822019144712247).get_channel(922128872722546688).send(random.choice(doots))
 bot.ghost_doot = ghost_doot
+
+
+
 
 ##### PLACES TO GET INFO #####
 # dir(my_thing) - lists the attributes in my_thing
