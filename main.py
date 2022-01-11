@@ -1055,7 +1055,12 @@ async def new_quest_embed(quest, guild, task=None):
 def quest_is_available(quest):
   if not quest['posted']:
     return False
-  if datetime.now().timestamp() > quest['posted']:
+  if quest['posted'] is True:
+    return True
+  days = int(quest['options'].get('expires',0))
+  now = datetime.now()
+  expiration = datetime.fromtimestamp(int(quest['posted'])) + timedelta(days=days)
+  if now > expiration:
     return False
   return True
 
@@ -1275,9 +1280,8 @@ async def q_list(ctx):
   quests = ''
   for i, q in quest_settings['quests'].items():
     if not quest_is_available(q):
-      # continue
-      pass
-    quests += f"**{i}**. __**{q['name']}**__\n\u200c \u200c \u200c "
+      continue
+    quests += f"**{i}**. __**{q['name']}**__\n\u200c \u200c \u200c \u200c "
     pn = q['options'].get('party', 1) 
     if pn == 0:
       quests += '***open***'
@@ -1324,6 +1328,25 @@ async def info(ctx, quest_id: questPartConverterFactory(3)):
   await ctx.reply(embed=embed)
 
 
+@quest.command(aliases=['publish'])
+@is_quest_master_or_admin()
+async def post(ctx, quest_number: questPartConverterFactory(1)):
+  quest, _ = quest_number
+  if int(quest['owner']) != ctx.message.author.id:
+    return await ctx.send("You don't own this quest!")
+  if quest['posted']:
+    return await ctx.send("You've already posted this quest!")
+  posted = True
+  # add xp transaction here later
+  days_till_expires = quest['options'].get('expires', 0)
+  if days_till_expires != 0:
+    posted = int(datetime.now().timestamp())
+
+  quest['posted'] = posted
+  save_quests()
+  await ctx.reply(f"quest {quest['id']} has been posted! ppl can now see it with `{bot.prefix}quest list`")
+
+
 @quest.command()
 async def accept(ctx, quest_number: questPartConverterFactory(1), * party_members: discord.Member):
   """Accept a Quest by yourself or with Party Members!
@@ -1337,6 +1360,7 @@ async def accept(ctx, quest_number: questPartConverterFactory(1), * party_member
   pass
 
 @quest.command(name="set")
+@is_quest_master_or_admin()
 async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, value):
   """Change options on your quests before you post them.
 
