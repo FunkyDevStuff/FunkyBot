@@ -571,9 +571,14 @@ def questPartConverterFactory(max_depth=3):
         parse_quest_id(argument)
       except:
         raise commands.BadArgument(f'{argument} is not the right format')
-
-      tp = types[argument.count('.')]
-      q = resolve_quest_id(argument)
+      try:
+        tp = types[argument.count('.')]
+      except:
+        raise commands.BadArgument(f'{argument} is not the right format')
+      try:
+        q = resolve_quest_id(argument)
+      except:
+        raise commands.BadArgument(f'{argument} not found.')
       return (q, tp)
   return QuestPartConverter
 
@@ -902,15 +907,20 @@ def parse_quest_id(s):
 def resolve_quest_id(s):
   ids = parse_quest_id(s)
   ret = quest_settings
-  keys = ['quests', 'tasks', 'objs']
+  keys = ['quests', 'tasks', 'objectives']
+  prev = None
   try:
     for i, key in zip(ids, keys):
       if key != 'quests':
         i -= 1
+      prev = ret
       ret = ret[key][i]
+      if key == 'objectives':
+        ret = (ret, prev)
   except:
     tps = ['quest', 'task', 'objective']
     tp = tps[s.count('.')][:-1]
+
     raise KeyError(f"can't find {tp} {s}")
   return ret
 
@@ -1000,6 +1010,8 @@ async def new_quest_embed(quest, guild, task=None):
     bonus = max(0, v)
     total_xp = bonus + task_xp
     s = f'reward: **{total_xp} xp**'
+    if total_xp > bonus:
+      s = 'total ' + s
     if v < 0:
       s = f'`cost: {v} xp`\n' + s
     return s
@@ -1306,6 +1318,8 @@ async def info(ctx, quest_id: questPartConverterFactory(3)):
     embed = await new_quest_embed(quest, ctx.guild)
   elif item_type == 'task':
     embed = gen_task_embed(quest, ctx.guild)
+  else:
+    embed = gen_obj_embed(quest, ctx.guild)
 
   await ctx.reply(embed=embed)
 
@@ -1497,7 +1511,20 @@ def gen_task_embed(task, guild):
   )
   return embed
 
-
+def gen_obj_embed(obj, guild):
+  obj, task = obj
+  q = quest_settings['quests'][str(task['qid'])]
+  tn = q['tasks'].index(task) + 1
+  on = task['objectives'].index(obj) + 1
+  desc = f"__{task['name']}__\n{obj['desc']}"
+  if obj['xp']:
+    desc += f" ({obj['xp']}) xp"
+  embed = discord.Embed(
+    title=f"{task['qid']}.{tn}.{on} {q['name']}",
+    description=desc,
+    color=get_quest_author(q, guild).color
+  )
+  return embed
 
 @quest.group()
 async def task(ctx):
@@ -2016,15 +2043,19 @@ async def on_ready():
 
 @bot.command()
 async def quote(ctx, time = None):
-  """power's a dumb dumb"""
+  """
+Reply to a Message with .quote to “quote” it. 
+If you want the time there as well then use .quote time"""
   if not ctx.message.reference:
     await ctx.reply("Ya gotta reply to a message")
-  reply = ctx.message.reference
-  msg_ = await ctx.fetch_message((reply.message_id))
   if time != None:
+    reply = ctx.message.reference
+    msg_ = await ctx.fetch_message((reply.message_id))
     msg_time = int((msg_.created_at).timestamp())
     await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " \n <t:{msg_time}:F>')
-  else:
+  if ctx.message.reference and time == None:
+    reply = ctx.message.reference
+    msg_ = await ctx.fetch_message((reply.message_id))
     await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " ')
     
 @bot.command()
