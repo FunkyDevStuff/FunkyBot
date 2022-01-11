@@ -971,26 +971,28 @@ async def new_quest_embed(quest, guild, task=None):
   def expire_fmt(v, f):
     if not v:
       return ''
+    
     now = datetime.now()
-    expires = (quest['posted'] or now) + timedelta(days=v)
+    nowi = int(datetime.now().timestamp())
+    expires = datetime.fromtimestamp(int(quest['posted']) or nowi) + timedelta(days=v)
     left = expires - now
 
     span = 'day'
     amt = left.days
-    if left.days >= 7*2:
+    if amt >= 7*2:
       amt//=7
       span = 'week'
     elif amt <= 1:
       amt=left.total_seconds()/60
       span = 'minute'
       if amt > 59:
-        amt//=60
+        amt/=60  # if hours or minutes then regular rounding 
         span = 'hour'
     
     if amt > 1:
       span += 's'
     
-    return f'quest expires in __{amt} {span}__'
+    return f'quest expires in __{round(amt)} {span}__'
   
   def time_fmt(v, f):
     if not v:
@@ -1026,6 +1028,7 @@ async def new_quest_embed(quest, guild, task=None):
 
   ext_opt = {
     'party': QUEST_OPTION_DEFAULTS['party'],
+    'expires': QUEST_OPTION_DEFAULTS['expires'],
     **quest['options'], 
     'tasks': quest['tasks']
   }
@@ -1377,7 +1380,7 @@ async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, 
   ovalue = value
 
   if not_owner and not admin:
-    return await ctx.reply('You are not the quest master that posted this quest')
+    return await ctx.reply('You are not the quest master that created this quest')
 
   option = option.lower()
 
@@ -1440,10 +1443,31 @@ async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, 
   if str(target.get(option, QUEST_OPTION_DEFAULTS.get(option))) == str(value):
     return await ctx.reply(f'{option} is already set to {ovalue}')
   
+  # if already posted
+  if quest['posted']:
+    msg = await ctx.reply("are you sure you want to alter this already posted quest?")
+    resp = await wait_for_reaction_response(
+      ctx, msg, ['✅', '❌'], 
+      from_members=[ctx.message.author],
+      timeout=20
+    )
+    if resp is None:
+      return await msg.reply("Took too long to react. Try again later")
+    if resp != '✅':
+      await msg.edit(content="Canceled.")
+      return
+    # alter posted time
+    if option == 'expires':
+      if int(value) == 0:
+        quest['posted'] = True
+      else:
+        quest['posted'] = int(datetime.now().timestamp())
+
   if value == QUEST_OPTION_DEFAULTS.get(option, None):
     del target[option]
   else:
     target[option] = value
+  
   save_quests()
 
   disp_val = f'**{ovalue}**'
