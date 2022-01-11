@@ -1360,6 +1360,13 @@ async def accept(ctx, quest_number: questPartConverterFactory(1), * party_member
     .quest accept 2 @.Power @Deno
     .quest accept 3
   """
+  # TODO: don't forget xp costs
+  quest, _ = quest_number
+  party_quest = {
+    'qid': quest['id'],
+    'party': [str(m.id) for m in party_members], # where should claim and participation go. I guess in the tasks and stuff
+    # '',
+  }
   pass
 
 @quest.command(name="set")
@@ -1410,6 +1417,9 @@ async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, 
       value = parsers[option](value)
     except Exception as e:
       return await ctx.reply(f'{ovalue} is not a valid option for {option}!')
+    if options == 'party' and quest['posted']:
+      if 0 in (value, quest['options'].get('party', QUEST_OPTION_DEFAULTS['party'])):
+        return await ctx.reply("cannot change between open and non-open quest types once a quest is posted")
 
     target = quest['options']
   
