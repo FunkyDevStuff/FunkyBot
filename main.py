@@ -36,6 +36,11 @@ bot = commands.Bot(command_prefix=PREFIX, description=description, intents=inten
 
 bot.prefix = PREFIX
 
+ATTACHMENT_BASE_URL = "https://cdn.discordapp.com/attachments/"
+
+def gen_attachment_url(channel_id, attachment_id, filename):
+  return ATTACHMENT_BASE_URL + f"{channel_id}/{attachment_id}/{filename}"
+
 ##### setting up persistent data that isn't reliant on replit db size limit #####
 DATA_FOLDER = 'data/'
 # put your data names here followed by default values they should be. if those defaults aren't there, the bot will add them when it restarts. it only checks one level deep though.
@@ -88,7 +93,6 @@ if 'BOT_SETTINGS' not in db.keys():
   db['BOT_SETTINGS'] = deepcopy(BOT_DEFAULT_SETTINGS)
 
 bot_settings = deepcopy(db['BOT_SETTINGS'])
-
 
 QUEST_DEFAULT_SETTINGS = {'quest_master_role': None}
 
@@ -528,9 +532,15 @@ def save_bot_settings():
 
 def save_quests():
   db['QUEST_SETTINGS'] = deepcopy(quest_settings)
+  db['ONGOING_QUESTS'] = deepcopy(ongoing_quests)
 
 def check_is_admin(member):
   return bot_settings['admin_role'] in [r.id for r in member.roles] or member.id == owner_id
+bot.check_is_admin = check_is_admin
+
+def check_is_quest_master(member):
+  return quest_settings['quest_master_role'] in [r.id for r in member.roles]
+bot.check_is_quest_master = check_is_quest_master
 
 def is_admin():
   def _is_admin(ctx):
@@ -539,7 +549,7 @@ def is_admin():
 
 def is_quest_master():
   def predicate(ctx):
-    return quest_settings['quest_master_role'] in [r.id for r in ctx.message.author.roles]
+    return check_is_quest_master(ctx.message.author)
   return commands.check(predicate)
 
 def is_quest_master_or_admin():
@@ -764,6 +774,7 @@ def setup_quests():
   defaults = {
     'tags': {},
     'quests': {},
+    'claims': {},
     'quest_counter': 1,
     'ongoing_quest_counter': 1
   }
@@ -952,7 +963,28 @@ async def _gen_desc(quest, author):
 def get_quest_author(quest, guild):
   return guild.get_member(int(quest['owner']))
 
+def get_player(author_id):
+  aid = str(author_id)
+  player = quest_settings['players'].get(aid, {
+    'id': aid,
+    'xp': 0,
+    'active': {},
+    'completed': {}
+  })
+  return player
+
+def get_quest_total_task_xp(quest):
+  return sum([
+      t.get('xp',0) + sum(o['xp'] for o in t.get('objectives',[]))
+      for t in quest['tasks']
+    ])
+
+
 async def new_quest_embed(quest, guild, task=None):
+  ongoing = 'qid' in quest
+  if ongoing:
+    ongoing = quest
+    quest = quest_settings['quest'][quest['qid']]
   name = quest['name']
   author = get_quest_author(quest, guild)
   desc = await _gen_desc(quest, author)
@@ -1004,10 +1036,7 @@ async def new_quest_embed(quest, guild, task=None):
     return s
   
   def xp_fmt(v, f):
-    task_xp = sum([
-      t.get('xp',0) + sum(o['xp'] for o in t.get('objectives',[]))
-      for t in f['tasks']
-    ])
+    task_xp = get_quest_total_task_xp(f)
     
     bonus = max(0, v)
     total_xp = bonus + task_xp
@@ -1125,6 +1154,7 @@ async def new(ctx, *, options:str):
     party=3
     I need me some rockets to celebrate my freedom
   """
+  # TODO: disallow certain option combinations, .. if needed
   options = options.strip()
   ooptions = options
   name, *options = [o.strip() for o in options.split('\n')]
@@ -1336,9 +1366,28 @@ async def info(ctx, quest_id: questPartConverterFactory(3)):
 async def post(ctx, quest_number: questPartConverterFactory(1)):
   quest, _ = quest_number
   if int(quest['owner']) != ctx.message.author.id:
-    return await ctx.send("You don't own this quest!")
+    return await ctx.reply("You don't own this quest!")
   if quest['posted']:
-    return await ctx.send("You've already posted this quest!")
+    embed = await ctx.reply(embed=await new_quest_embed(quest, ctx.guild))
+    msg = await ctx.reply("You've already posted this quest! Take it down? You can always post it again later.")
+    resp = await wait_for_reaction_response(
+      ctx, msg, 
+      ['✅', '❌'], from_members=[ctx.message.author],
+      timeout=30
+    )
+    if resp is None:
+      return await ctx.send("took too long to react. try again later")
+    if resp != '✅':
+      await msg.edit(content='Ok. Keeping quest published.')
+      return
+    quest['posted'] = False
+    save_quests()
+    await embed.delete()
+    await msg.edit(content=f"Quest **{quest['id']}** taken down.")
+    return 
+  task_xp = get_quest_total_task_xp(quest)
+  if quest['options']['xp'] + task_xp <= 0:
+    return await ctx.reply(f"Completing this quest gives adventurers {quest['options']['xp'] + task_xp} xp. They need to at least receive some xp for completing quests.")
   posted = True
   # add xp transaction here later
   days_till_expires = quest['options'].get('expires', 0)
@@ -1362,11 +1411,88 @@ async def accept(ctx, quest_number: questPartConverterFactory(1), * party_member
   """
   # TODO: don't forget xp costs
   quest, _ = quest_number
+  if not quest_is_available(quest):
+    return await ctx.reply('That quest is not available to be taken.')
+  
+  if quest['options']['party'] == 0:
+    return await ctx.reply("That quest is an open quest, you don't need to accept it, just start claiming things from it!")
+  
+  party_members = [set([ctx.message.author, *party_members])]
+
+  if quest['options']['party'] != len(party_members):
+    if quest['options']['party'] == 1:
+      return await ctx.reply('That quest is a solo quest') 
+    return await ctx.reply(f"That quest requires a party of {quest['options']['party']}.")
+
+  cant_players = set()
+  for p in party_members:
+    if p.id in quest['playing']:
+      cant_players.add(p)
+    if quest['options'].get('redoes', QUEST_OPTION_DEFAULTS['redoes']) is False:
+      if p.id in quest['played']:
+        cant_players.add(p)
+
+  if cant_players:
+    return await ctx.reply(f"This party can't take this quest. These members are or have already taken this quest: {', '.join(p.mention for p in cant_players)}")
+  
+
+  # ask to accept
+  embed = await new_quest_embed(quest, ctx.guild)
+  ms = f"accept this quest?"
+
+  if len(party_members) > 1:
+    ms = f"{ctx.message.author.mention} wants to do this quest with you {' '.join(m.mention for m in party_members)}. Do you all accept?"
+  msg = await ctx.reply(ms, embed=embed)
+
+  curry_quest_stuff = {'party': {}, 'denied': False}
+
+  def agree(reaction, user):
+    curry_quest_stuff['party'][user.id] = user
+    if len(curry_quest_stuff['party']) == len(party_members):
+      return True
+  
+  def cancel(reaction, user):
+    curry_quest_stuff['denied'] = user
+    return False
+  
+  def rmagree(reaction, user):
+    del curry_quest_stuff['party'][user.id]
+  
+  responses = {'✅': agree, '❌': cancel}
+  rmreponses = {'✅': rmagree}
+  await msg.add_reaction('✅')
+  await msg.add_reaction('❌')
+  try:
+    await reaction_menu(
+      ctx, msg, responses, rmreponses, from_members=party_members, timeout=60*5
+    )
+  except asyncio.exceptions.TimeoutError:
+    slowppl = [m for m in party_members if m.id not in curry_quest_stuff['party']]
+    return await msg.reply(f"{' '.join([m.mention for m in slowppl])} didn't respond in time. Try again.")
+  if curry_quest_stuff['denied']:
+    if len(party_members) > 1:
+      return await msg.reply(f"{curry_quest_stuff['denied'].mention} chose not to accept the quest. All party members must accept the quest to start one.")
+    else:
+      return await msg.edit('Canceled', embed=None)
+  
+  oqc = quest_settings['ongoing_quest_counter']
+  quest_settings['ongoing_quest_counter'] += 1
   party_quest = {
+    'id': oqc,
     'qid': quest['id'],
-    'party': [str(m.id) for m in party_members], # where should claim and participation go. I guess in the tasks and stuff
+    'party': {str(m.id): 0 for m in party_members},
+    'tasks': {},
+    # where should claim and participation go. I guess in the tasks and stuff
     # '',
   }
+  plos = [get_player(m) for m in party_members]
+  for p in plos:
+    quest['playing'][p['id']] = oqc
+    p['active'][quest['id']] = oqc
+    quest_settings['players'][p['id']] = p
+  ongoing_quests[oqc] = party_quest
+  save_quests()
+  # TODO: add a poll loop to check for timed out quests and notify parties
   pass
 
 @quest.command(name="set")
@@ -1417,7 +1543,7 @@ async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, 
       value = parsers[option](value)
     except Exception as e:
       return await ctx.reply(f'{ovalue} is not a valid option for {option}!')
-    if options == 'party' and quest['posted']:
+    if option == 'party' and quest['posted']:
       if 0 in (value, quest['options'].get('party', QUEST_OPTION_DEFAULTS['party'])):
         return await ctx.reply("cannot change between open and non-open quest types once a quest is posted")
 
@@ -1486,16 +1612,218 @@ async def quest_set(ctx, quest_number: questPartConverterFactory(1), option, *, 
 
   await ctx.reply(f"**{quest['id']}**. **{quest['name']}**: **{option}** set to {disp_val}" + also)
   
+PARTICIPANT_PATTERN = re.compile(r"\s*(?:<@!?(?P<aid>\d+)>\s*)")
 
 @quest.command()
-async def claim(ctx, quest_id: str, description: str=None):
-  """Claim a Quest/Track with a description to await Verification!
+async def claim(ctx, quest_id: questPartConverterFactory(3), *, participants_and_description: str=None):
+  """Claim a Quest/Task/Objective with a description to await Verification!
 
   Example:
     .quest claim 4.3 The Diamonds are in the Mailbox!
     .quest claim 1.2.4 <picture of music discs>
+    .quest claim 2.1.3 @Green @Susan We left a little extra in your barrels
   """
-  pass
+  # split last arg into members (ids) and description
+  li = 0
+  participants = []
+  for m in PARTICIPANT_PATTERN.finditer(participants_and_description):
+    participants.append(m.group('aid'))
+    li = m.span()[-1]
+  description = participants_and_description[li:]
+  description = description.strip() or None
+
+  item, item_type = quest_id
+  quest = item
+  task = None
+  objective = None
+  tid = None
+  idstr = ''
+  what = ''
+  if item_type == "objective":
+    objective, task = item
+    quest = quest_settings['quests'][task['qid']]
+    tid = quest['tasks'].index(task) + 1
+    oid = task['objectives'].index(objective) + 1
+    idstr = f'{quest["id"]}.{tid}.{oid}'
+    what = objective['desc']
+    embed = gen_obj_embed(objective, ctx.guild)
+  if item_type == "task":
+    task = item
+    quest = quest_settings['quests'][task['qid']]
+    tid = quest['tasks'].index(task) + 1
+    idstr = f'{quest["id"]}.{tid}'
+    what = task['name']
+    embed = gen_task_embed(task, ctx.guild)
+  else:
+    idstr = quest['id']
+    what = quest['name']
+    embed = await new_quest_embed(quest, ctx.guild)
+  
+  quest_owner = ctx.guild.get_member(int(quest['owner']))
+  if not quest_is_available(quest):
+    return await ctx.reply(f"Quest **{quest['id']}. {quest['name']}** was taken down or has expired! Contact Quest Master **{quest_owner.display_name}** if you'd like it reposted.")
+
+  author = ctx.message.author
+  player = get_player(author)
+  make_open_party_quest = False
+
+  # player hasn't acccepted quest
+  if author.id not in quest['playing']:
+    # quest not open
+    if quest['options']['party'] != 0:
+      return await ctx.reply(f"You have not accepted this quest yet! You must first accept it with `{bot.prefix}quest accept {quest['id']} [..party member mentions]` before claiming tasks on this quest!")
+    else:
+      make_open_party_quest = True
+  else:
+    party_quest = ongoing_quests[quest['playing'][player['id']]]
+  
+
+  embed_msg = await ctx.reply(embed=embed)
+  if make_open_party_quest:
+    if quest['playing']:
+      oqc = list(quest['playing'].values())[0]
+      party_quest = ongoing_quests[oqc]
+      if player['id'] not in party_quest['party']:
+        party_quest['party'][player['id']] = 0
+        quest['playing'][player['id']] = oqc
+        player['active'][quest['id']] = oqc
+        quest_settings['players'][player['id']] = player
+    else:
+      oqc = quest_settings['ongoing_quest_counter']
+      quest_settings['ongoing_quest_counter'] += 1
+      party_quest = {
+        'id': oqc,
+        'qid': quest['id'],
+        'party': {str(author.id): 0}, 
+        'tasks': {},
+      }
+      quest['playing'][player['id']] = oqc
+      player['active'][quest['id']] = oqc
+      quest_settings['players'][player['id']] = player
+      ongoing_quests[oqc] = party_quest
+      # save_quests() save at end. ensure no await tho
+  # TODO: elif quest progressive and prev task not completed
+
+  target = party_quest
+  if objective:
+    target = party_quest['tasks'].set_default(str(tid),{'objectives': {}})['objectives'].set_default(str(oid), {})
+  elif task:
+    target = party_quest['tasks'].set_default(str(tid), {})
+  claim = target.set_default('claim', {'owner': None})
+
+  oclaim_embed = None
+  replace = False
+  if claim['owner'] is not None and claim['owner'] != player['id']:
+    try:
+      oclaim_channel = ctx.guild.get_channel(int(claim['channel']))
+      oclaim_msg = oclaim_channel.get_message(int(claim['msg']))
+    except:
+      target['claim'] = {'owner': None}
+    else:
+      replace = True
+      owner = ctx.guild.get_member(int(claim['owner']))
+      msg = await ctx.reply(f"{author.mention} is trying to claim {item_type} {idstr} but {owner.mention} has already claimed it. {owner.mention}, would you like to replace your claim with theirs? ({author.mention}, you can cancel this too by clicking :x:)",
+        embed=discord.Embed(title="jump to original claim", url=oclaim_msg.jump_url)
+      )
+      await msg.add_reaction('✅')
+      await msg.add_reaction('❌')
+      response = {}
+      def reaction_curry(r):
+        def radd(reaction, user):
+          if r == '✅' and user.id == author.id:
+            return
+          response['r'] = r
+          response['user'] = user
+          return r
+        return radd
+      adds = {r: reaction_curry(r) for r in '✅❌'}
+
+      try:
+        await reaction_menu(ctx, msg, adds, {}, [author, owner], timeout=60*5)
+      except asyncio.TimeoutError:
+        await msg.reply('Did not receive a response for this. Try again.')
+        await embed_msg.delete()
+        return
+      if response['r'] == '❌':
+        await msg.reply(f"{response['user'].mention} canceled this claim.")
+        await embed_msg.delete()
+        return
+      # mark claim as not relevant anymore
+      await oclaim_msg.add_reaction('🚫')
+  elif claim['owner'] == player['id']:
+    try:
+      oclaim_channel = ctx.guild.get_channel(int(claim['channel']))
+      oclaim_msg = oclaim_channel.get_message(int(claim['msg']))
+    except:
+      target['claim'] = {'owner': None}
+    else:
+      replace = True
+      oclaim_embed = discord.Embed(title="jump to original claim", url=oclaim_msg.jump_url)
+  
+  # is owner or new.. or owner agreed to replace it
+  claim['owner'] = player['id']
+  claim['channel'] = str(ctx.channel.id)
+  claim['msg'] = str(ctx.message.id)
+  claim['members'] = list(set([player['id'], *participants])) if participants else [player['id']]
+  claim['verified'] = False
+  claim['desc'] = description
+  claim['attachments'] = [
+    {
+      'file': a.filename, 
+      'id': a.id
+    }
+    for a in ctx.message.attachments
+  ]
+  claim['what'] = what
+  claim['owner_notif'] = None
+  claim['notif_imgs'] = None
+  claim['id_path'] = idstr
+  claim['pqid'] = party_quest['id']
+  quest_settings['claims'][claim['msg']] = {
+    'pqid': party_quest['id'], 
+    'id_path': idstr
+  }
+  save_quests()
+  embed = await gen_claim_embed(claim, ctx.guild)
+  try:
+    msg = await quest_owner.send(embed=embed)
+    claim['owner_notif'] = str(msg.id)
+    quest_settings['claims'][str(msg.id)] = {'msg': claim['msg']}
+    if ctx.message.attachments:
+      atts = '\n'.join([a.url for a in ctx.message.attachments])
+      msg = await msg.reply(f"Attached images: {atts}")
+      claim['notif_imgs'] = str(msg.id)
+      quest_settings['claims'][str(msg.id)] = {'msg': claim['msg']}
+  except:
+    pass
+
+  await ctx.reply(f"You've claimed {item_type} **{idstr}**{' (replacing the previous claim)' if replace else ''}! {quest_owner.mention} will verify it soon.", embed=oclaim_embed)
+
+@quest.command()
+@is_quest_master_or_admin()
+async def decline(ctx, *message_id: discord.Message):
+  """Decline a Claim by an adventurer.
+
+  Specify the claim to decline by writing your .quest decline message as a reply to the claim message.
+
+  In order to decline multiple claims at once, you'll need to use message ids instead of replies. Get them by right clicking the .quest claim message (or notification) and clicking "Copy ID". To see this option, you may need to turn on Developer Mode in your discord settings > App Settings > Advanced.
+
+  Example:
+    .quest decline  <-- as a reply to the claim msg (or notification)
+    .quest decline 919751809344622673 919761722800209961
+  """
+  msgs = message_id 
+  # I missed that
+  # julius ceaser dressing is for plebs
+  # touche
+  # :P we don't get chat points here
+  if ctx.message.reference:
+    reply = await ctx.guild.get_channel(ctx.message.reference.channel_id).fetch_message(ctx.message.reference.message_id)
+    msgs = [reply, msgs*]
+  msgs = list(set(msgs))
+  
+  
+
 
 @quest.command()
 @is_quest_master_or_admin()
@@ -1504,10 +1832,10 @@ async def verify(ctx, *message_id: discord.Message):
 
   Specify the claim to verify by writing your .quest verify message as a reply to the claim message.
 
-  In order to verify multiple claims at once, you'll need to us message ids instead of replies. Get them by right clicking the .quest claim message and clicking "Copy ID". To see this option, you may need to turn on Developer Mode in your discord settings > App Settings > Advanced.
+  In order to verify multiple claims at once, you'll need to use message ids instead of replies. Get them by right clicking the .quest claim message (or notification) and clicking "Copy ID". To see this option, you may need to turn on Developer Mode in your discord settings > App Settings > Advanced.
 
   Example:
-    .quest verify  <-- as a reply to the claim msg
+    .quest verify  <-- as a reply to the claim msg (or notification)
     .quest verify 919751809344622673 919761722800209961
   """
   pass
@@ -1582,6 +1910,23 @@ def gen_obj_embed(obj, guild):
     description=desc,
     color=get_quest_author(q, guild).color
   )
+  return embed
+
+async def gen_claim_embed(claim, guild):
+  channel = guild.get_channel(claim['channel'])
+  cmsg = await channel.fetch_message(claim['msg'])
+  author = guild.get_member(int(claim['owner']))
+  embed = discord.Embed(
+    title=f"Claimed {claim['id_path']} {claim['what']}",
+    url=cmsg.jump_url,
+    description=claim['desc'],
+    color=cmsg.author.color
+  ).set_author(
+    name=author.display_name,
+    icon_url=author.avatar_url,
+  )
+  if len(claim['members']) > 1:
+    embed.set_footer(text=f"Claimed by {'@' + guild.get_member(int(m)).display_name for m in claim['members']}")
   return embed
 
 @quest.group()
@@ -2105,17 +2450,62 @@ async def quote(ctx, time = None):
 Reply to a Message with .quote to “quote” it. 
 If you want the time there as well then use .quote time"""
   if not ctx.message.reference:
-    await ctx.reply("Ya gotta reply to a message")
+    return await ctx.reply("Ya gotta reply to a message")
   if time != None:
     reply = ctx.message.reference
     msg_ = await ctx.fetch_message((reply.message_id))
     msg_time = int((msg_.created_at).timestamp())
     await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " \n <t:{msg_time}:F>')
-  if ctx.message.reference and time == None:
+  if time == None:
     reply = ctx.message.reference
     msg_ = await ctx.fetch_message((reply.message_id))
     await ctx.send(f'>>> {msg_.author} aka {msg_.author.nick} \n " **{msg_.content}**  " ')
-    
+
+
+@bot.group(alises = ['scratchcard'])
+async def scratchCards(ctx):
+  """generates a scratchcard"""
+  if ctx.invoked_subcommand is None:
+    await ctx.send_help(ctx.command) # i copied u this time :P
+
+
+@scratchCards.command()
+async def card(ctx):
+  """ Power write me another help plz"""
+  emoji_scratch = [':one:',':two:',':three:', '<:dogekek:740526136844615710>']
+  lineCount = 0
+  Scratchcard = str()
+  sCount = 0
+  # 5 lines
+  while lineCount != 4:
+    # grab 4 random things
+    cardRandomiser = random.choices(emoji_scratch, k=4)
+    # for each thing
+    for s in list(cardRandomiser):
+      sCount += 1
+      Scratchcard += "|| " + s + " ||" # same thing
+      # "||{}||".format(s) # same thing. it just sticks the thing into th string
+      if sCount == 4: #ill try redo this tomorrow
+        Scratchcard = Scratchcard + '\n'  
+        sCount = 0
+    # kk. try it out before you sleep :P
+    # aight. go sleep :P
+    # formatScratch = (''.join(f"||{s}||" for s in (Scratchcard))) # ah, see what you're doing is grabbing every letter in the string that is scratchcard. 
+    lineCount += 1
+  await ctx.send(f'>>> Scratch to win! \n {Scratchcard} ')
+  
+@scratchCards.command(name= 'check' )
+async def checkScratch(ctx):
+  """checks winning"""
+  emoji_scratch = ['1','2','3','4']
+  reply = ctx.message.reference
+  ThingToCheck = await ctx.fetch_message((ctx.message_id)) #need to check if this is ac a thing to check
+  scratchToCheck = await ctx.fetch_message((reply.message_id))
+
+  
+
+
+
 @bot.command()
 async def doot(ctx):
   """Doot, thats it """
@@ -2240,7 +2630,7 @@ async def deaths(ctx):
 
 async def ghost_doot():
   doots = [
-    'Doot','Ily Foxo', 
+    'Doot', 
     'dooot', 'd o o t', 'DoooOOOooot', 'dwoot', 'I am Sir DootsAlot III', 'doot doot','https://tenor.com/view/pingu-noot-noot-not-noot-sit-gif-21639411',
     'https://cdn.discordapp.com/attachments/922128872722546688/926970135586148383/dooot.gif'
   ]
@@ -2262,5 +2652,6 @@ server.keep_alive(bot)
 
 bot.bot_settings = bot_settings
 bot.quest_settings = quest_settings
+bot.ongoing_quests = ongoing_quests
 
 bot.run(my_secret, reconnect=True) # <-- reconnects if it disconnects
